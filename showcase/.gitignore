@@ -1,0 +1,16 @@
+# build output
+/native/*.dll
+/native/*.pdb
+/native/build/
+/native/vcpkg_installed/
+/dist/
+
+# frontend
+node_modules/
+/ui/dist/
+
+# editors
+.vs/
+.vscode/
+*.user
+.claude/

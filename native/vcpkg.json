@@ -1,0 +1,17 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "phantasm",
+  "version-string": "1.0.0",
+  "description": "Phantasm - a shared actor renderer for Skyrim SE/AE",
+  "dependencies": [
+    "commonlibsse-ng",
+    "directxtk",
+    "directxtex",
+    "directxmath",
+    "fmt",
+    "rapidcsv",
+    "spdlog",
+    "xbyak",
+    "nlohmann-json"
+  ]
+}

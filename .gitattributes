@@ -1,0 +1,5 @@
+# LF in the repository, CRLF in every checkout whatever core.autocrlf says: package.ps1 ships data/ as checked out.
+* text=auto eol=crlf
+*.swf binary
+# The Showcase's built pages ship byte for byte as the build wrote them.
+showcase/data/** -text

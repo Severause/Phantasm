@@ -1,0 +1,11 @@
+# build output
+/native/*.dll
+/native/*.pdb
+/dist/
+*.zip
+
+# editors
+.vs/
+.vscode/
+*.user
+.claude/

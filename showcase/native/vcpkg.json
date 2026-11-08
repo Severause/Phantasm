@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "phantasmshowcase",
+  "version-string": "1.0.0",
+  "description": "Phantasm Showcase - live 3D showcase pages for Phantasm",
+  "dependencies": [
+    "commonlibsse-ng",
+    "directxtk",
+    "directxmath",
+    "fmt",
+    "rapidcsv",
+    "spdlog",
+    "xbyak",
+    "nlohmann-json"
+  ]
+}
