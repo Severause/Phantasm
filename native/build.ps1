@@ -5,6 +5,8 @@
 #   .\build.ps1 -Clean     start from an empty build directory
 #
 # Build directory: C:\b\phantasm (short, so vcpkg's paths stay under MAX_PATH); PHANTASM_BUILD_DIR overrides it.
+# PHANTASM_NR_VULKAN, when set to a folder holding Khronos's Vulkan headers (vulkan/vulkan.h), also builds neural
+# rendering's own library PhantasmNRInProc.dll (see CMakeLists.txt).
 # vcpkg: VCPKG_ROOT as set when the script starts, else the standalone one at C:\vcpkg (VS's bundled vcpkg, which
 # vcvars64.bat would set, does not detect VS 18).
 
@@ -84,7 +86,8 @@ New-Item -ItemType Directory -Path $buildDir -Force | Out-Null
     "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
     "-DVCPKG_TARGET_TRIPLET=x64-windows-static" `
     "-DCMAKE_C_COMPILER=cl.exe" "-DCMAKE_CXX_COMPILER=cl.exe" `
-    "-DPHANTASM_BUILD_TESTS=$(if ($Tests) { 'ON' } else { 'OFF' })"
+    "-DPHANTASM_BUILD_TESTS=$(if ($Tests) { 'ON' } else { 'OFF' })" `
+    "-DPHANTASM_NR_VULKAN=$env:PHANTASM_NR_VULKAN"
 if ($LASTEXITCODE -ne 0) { Fail "CMake configure failed" }
 
 # main.cpp carries the build time the log prints: touch it so every build stamps a new one.
@@ -110,4 +113,10 @@ if ((Select-String -Path $log -Pattern '^\[\d+/\d+\] ' -Quiet) -and $dll.LastWri
 }
 Copy-Item $dll.FullName -Destination $PSScriptRoot -Force
 Copy-Item (Join-Path $buildDir "Phantasm.pdb") -Destination $PSScriptRoot -Force -ErrorAction SilentlyContinue
+if ($env:PHANTASM_NR_VULKAN) {
+    $nrIn = Get-Item (Join-Path $buildDir "PhantasmNRInProc.dll") -ErrorAction SilentlyContinue
+    if (-not $nrIn) { Fail "PHANTASM_NR_VULKAN is set but PhantasmNRInProc.dll was not built" }
+    Copy-Item $nrIn.FullName -Destination $PSScriptRoot -Force
+    Write-Host "PhantasmNRInProc.dll built ($([math]::Round($nrIn.Length / 1KB)) KB)" -ForegroundColor Green
+}
 Write-Host "BUILD SUCCESSFUL: $($dll.FullName) ($([math]::Round($dll.Length / 1KB)) KB)" -ForegroundColor Green

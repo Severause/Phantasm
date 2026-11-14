@@ -114,7 +114,9 @@ $entries.Add([pscustomobject]@{ Name = "$lic/PhantasmShowcase-MIT.txt"; Source =
 $entries.Add([pscustomobject]@{ Name = "$lic/MagelightUI-API-MIT.txt"; Source = (Join-Path $root "native\extern\magelight\LICENSE.txt"); Text = $null })
 $entries.Add([pscustomobject]@{ Name = "$lic/SKSEMenuFramework-API-MIT.txt"; Source = (Join-Path $root "native\extern\skse-menu-framework\LICENSE.txt"); Text = $null })
 foreach ($name in "CommonLibSSE-NG-MIT", "DirectXMath-MIT", "DirectXTK-MIT", "fmt-MIT", "nlohmann-json-MIT", "openvr-BSD3",
-                  "rapidcsv-BSD3", "spdlog-MIT", "xbyak-BSD3") {
+                  "rapidcsv-BSD3", "spdlog-MIT", "xbyak-BSD3",
+                  # SKSE Menu Framework's header carries Dear ImGui's declarations as cimgui words them.
+                  "Dear-ImGui-MIT", "cimgui-MIT") {
     $src = Join-Path $repo "data\SKSE\Plugins\Phantasm\Licenses\$name.txt"
     if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { Fail "$src is missing" }
     $entries.Add([pscustomobject]@{ Name = "$lic/$name.txt"; Source = $src; Text = $null })

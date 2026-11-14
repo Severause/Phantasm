@@ -35,6 +35,7 @@ D3D11 SRV, and stills. Read `docs/DESIGN.md` first; `docs/API.md` is the client'
 - The log is `Phantasm.log` in the SKSE log folder (`Documents/My Games/<game>/SKSE`).
 - The probe (`testclient/`) is a development client that never ships. F7 opens a HUD panel with a live view of the
   crosshair actor or the player; Ctrl+F7 toggles the captured pose, Alt+F7 the size, Shift+F7 / Ctrl+Shift+F7 step
-  through animation stages (its `clips.txt`, else a few vanilla idles) and Ctrl+Alt+F7 brings a partner in. The
+  through animation stages (its `clips.txt`, else a few vanilla idles), Ctrl+Alt+F7 brings a partner in and
+  Alt+Shift+F7 toggles the `aim` hint between face and figure. The
   numpad, or the arrows, Page Up / Down and Home, drive the camera. F8 and its modifiers open more panels and ask for
   stills; the top of `testclient/src/Probe.cpp` lists them.

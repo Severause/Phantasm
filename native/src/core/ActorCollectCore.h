@@ -2,12 +2,14 @@
 
 // Phantasm - ActorCollectCore: what the actor view leaves out of an actor's 3D when it collects it (CollectActorGeometryStage
 // in MannequinRenderer.cpp), engine-free (native/build.ps1 -Tests): the engine's runtime attachments, which are not the
-// actor's look, and the engine-hidden parts.
+// actor's look, and the engine-hidden parts. Also which of its nodes' worlds the view does not take as the game left
+// them (TakesChain).
 //
 // Author: Severause
 
 #include "AsciiText.h"
 
+#include <cmath>
 #include <cstdint>
 #include <string_view>
 
@@ -299,5 +301,44 @@ namespace Phantasm::ActorCollectCore
         if (owed == 0) return 0;
         if (owed != owedBefore) return 1;
         return triesBefore;
+    }
+
+    // A world another mod left shrunk.
+    // A first-person body mod (Improved Camera) hides the head, the upper arms and the weapons on the back of the
+    // player's third-person body for the game's own picture: it shrinks the node, updates the worlds below it and
+    // puts the local scale back. The world then stays shrunk until the game updates it again while the locals say
+    // the part shows, and a pose drawn from the bones' worlds draws every vertex of the part on one point. The
+    // positions below a world shrunk a thousandfold are rounded away too, so such a node is posed again from its
+    // locals, never scaled back up.
+
+    /// A world scale below this is looked at (TakesChain); every other world is taken as the game left it.
+    inline constexpr float kSmallWorldScale = 0.05f;
+    /// A world this many times smaller than its parent's world and its own local give was left shrunk.
+    inline constexpr float kShrunkWorldRatio = 0.1f;
+    /// Under a shrunk parent, a world this many times larger than that parent hands down was written since.
+    inline constexpr float kWrittenWorldRatio = 10.0f;
+
+    /// False for NaN, as every test here: an unreadable world is never replaced. Nor is a negative one (a severed
+    /// limb's bone): no shrink leaves one.
+    inline bool SmallWorld(float worldScale) noexcept { return worldScale >= 0.0f && worldScale < kSmallWorldScale; }
+
+    /// Whether a node's world was left shrunk under a parent whose world is taken as it is: its locals give a scale
+    /// that shows and its world is far below it. A node its own local hides (scale 0, or a negative one) is not.
+    inline bool WorldShrunk(float worldScale, float parentWorldScale, float localScale) noexcept
+    {
+        const float fromLocals = parentWorldScale * localScale;
+        return fromLocals >= kSmallWorldScale && worldScale < fromLocals * kShrunkWorldRatio;
+    }
+
+    /// Whether a node takes its world from its chain (its local on the world its parent was given) instead of its
+    /// own, walking an actor's 3D parents first. Only a small world is ever replaced (the view looks no other up).
+    /// Under a parent that took its chain, one at the scale that parent's own (shrunk) world hands down is the same
+    /// shrink; one far above it was written since at a scale of its own (a physics bone) and stays.
+    /// parentWorldScale: the parent's own world scale, as the game left it.
+    inline bool TakesChain(bool parentTookChain, float worldScale, float parentWorldScale, float localScale) noexcept
+    {
+        if (!SmallWorld(worldScale)) return false;
+        if (parentTookChain) return worldScale <= std::fabs(parentWorldScale * localScale) * kWrittenWorldRatio;
+        return WorldShrunk(worldScale, parentWorldScale, localScale);
     }
 }

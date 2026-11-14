@@ -12,7 +12,9 @@
 // brings a partner into the picture (the "scene" hint: the actor under the crosshair, else the nearest other one) or
 // sends them away. A stage is a line of Data/SKSE/Plugins/PhantasmProbe/clips.txt, "<first position> | <second>"
 // (paths under meshes, '#' starts a comment; the second may be left off), else five stages of vanilla idles.
-// The first position goes to the woman of a pair with one, the view's actor otherwise.
+// The first position goes to the woman of a pair with one, the view's actor otherwise. Alt+Shift+F7 toggles the "aim"
+// hint between face and figure (Phantasm 1.1.0+): with a stage playing, the camera keeps the face in view however
+// the stage turns or lays the actor down; the zoom then closes on the face, so 8/2/4/6 do nothing.
 //
 // Smaller panels at the right of the display, each a view in a slot of its own, so up to four views draw at once
 // (Phantasm 0.4.0+; an older one shows them waiting): F8 toggles one of the actor under the crosshair or the player,
@@ -73,6 +75,7 @@ namespace
     MAGELIGHT_API::ViewId           g_page = 0;
     bool                            g_captured = false;
     bool                            g_frozen   = false;   // the first panel's "freeze" hint
+    bool                            g_faceAim  = false;   // the first panel's "aim" hint: face, else figure
     std::size_t                     g_size  = 0;   // index into kSizes
     std::uint32_t                   g_picW = 360, g_picH = 480;
     float                           g_aimU = 0.5f, g_aimV = 0.5f;
@@ -448,8 +451,9 @@ namespace
         g_aimU = g_aimV = 0.5f;
         Aim(0.0f, 0.0f);
         if (!OpenOn(g_actor)) return;
-        // A new view starts from no hints: the pose, the freeze and the stage come back with it.
+        // A new view starts from no hints: the pose, the freeze, the aim and the stage come back with it.
         if (g_frozen) g_api->SetHint(g_view, "freeze", "on");
+        if (g_faceAim) g_api->SetHint(g_view, "aim", "face");
         if (g_captured) {
             g_api->SetHint(g_view, "pose", "captured");
             g_api->SetHint(g_view, "motion", "on");
@@ -519,6 +523,10 @@ namespace
                 const bool alt   = (::GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
                 if (alt && ctrl && g_view) {
                     TogglePartner();
+                } else if (alt && shift && g_view) {
+                    g_faceAim = !g_faceAim;
+                    g_api->SetHint(g_view, "aim", g_faceAim ? "face" : "figure");
+                    SKSE::log::info("probe: the first panel aims at the {}", g_faceAim ? "face" : "figure");
                 } else if (alt && g_page) {
                     CycleSize();
                 } else if (shift && g_view) {
@@ -581,7 +589,7 @@ namespace
         LoadClipList();
         SKSE::log::info("probe: ready - F7 toggles the panel, Ctrl+F7 cycles the pose, Alt+F7 the size, Shift+F7 "
                         "plays the next stage and Ctrl+Shift+F7 the one before, Ctrl+Alt+F7 brings a partner in or "
-                        "out; the numpad zooms (+/-), aims (8/2/4/6), turns (7/9), tilts (1/3) and resets (5), as do the "
+                        "out, Alt+Shift+F7 toggles the face aim; the numpad zooms (+/-), aims (8/2/4/6), turns (7/9), tilts (1/3) and resets (5), as do the "
                         "arrows (turn, tilt), Page Up / Down (zoom) and Home (reset); F8 / Ctrl+F8 / Alt+F8 toggle an actor, an item and another "
                         "actor panel, Shift+F8 asks for a Cutout and Ctrl+Shift+F8 for an item still, Alt+Shift+F8 freezes the "
                         "first panel");

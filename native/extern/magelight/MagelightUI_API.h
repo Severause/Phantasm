@@ -21,10 +21,19 @@
 //    task to the game thread).
 //  - JS listener callbacks fire on the RENDER thread mid-frame — snapshot
 //    what you need, then post the game-state work with PostGameTask (0.30.1+).
+//    The render thread is the game's main thread inside Present (VR, hosts
+//    before 1.7.0, or Magelight.json "pageThread": false), or, by default on
+//    host 1.7.0+, flat only, Magelight's own page thread, running with the game
+//    thread (QueryCapability("pageThread") == 1): never assume either, the
+//    player can change it between sessions. Never touch RE:: state or the
+//    game's D3D11 immediate context from a render-thread callback (render
+//    texture images on the game thread, then InvalidateImage), and guard any
+//    state such a callback shares with your game-thread code.
 //  - Never call SKSE's AddTask or AddUITask from a callback the host makes
 //    inside a frame: JS listeners, DOM ready, VR callbacks, and for a
 //    RenderThread mod its events and EvalJS results (and onLog for a call made
-//    from one of these). They run inside the game's Present, and on Skyrim VR
+//    from one of these). They run inside the game's Present (or on Magelight's
+//    page thread, where the same advice holds), and on Skyrim VR
 //    SKSE also drains its task queues on game job threads, holding a queue's
 //    lock until it is empty, so the post can wait forever on a job that waits
 //    for the frame. PostGameTask hands the post to a host thread instead (task
@@ -52,8 +61,12 @@
 //    THREAD, not always the render thread: page/console/resize events come
 //    from the render thread, UIModeEntered/Exited/Refused from the game
 //    thread, FocusDenied from the requesting mod's thread, RenderDead from
-//    whichever present thread saw the kill switch. Pick RenderThread only if
-//    your handler is thread-agnostic. A faulting handler disables that mod's
+//    whichever present thread saw the kill switch. With "pageThread" the
+//    page thread is the render thread, so the handler can be entered from two
+//    threads at once, and a page event can still enter it after UnregisterMod
+//    has returned on another thread: keep `user` and the handler alive for
+//    the rest of the process. Pick RenderThread only if your handler is
+//    thread-agnostic and reentrant. A faulting handler disables that mod's
 //    sink, never the overlay.
 //  - ModDesc.onLog fires synchronously on the thread of the failing API
 //    call, outside the host's locks (calling back into the API is allowed).
@@ -64,6 +77,8 @@
 // (tracks the backbuffer). htmlPath is relative to Magelight's runtime dir,
 // or an absolute Windows path (drive-letter form). v4's ViewDesc carries an
 // explicit Anchor instead of the sign convention.
+// Every path argument is UTF-8 (1.6.1; text that is not valid UTF-8 is read
+// in the ANSI code page, which is how earlier hosts read all of them).
 //
 // Texture images (v2): render into a D3D11 texture you own on the GAME's
 // device, register its SRV under a name, place ImageUrl(id) in an <img> or
@@ -246,8 +261,12 @@ namespace MAGELIGHT_API {
         FocusDenied = 6,      // another mod asked for UI mode while you own it; detail = its modId
         DisplayResized = 7,   // x = width, y = height (backbuffer pixels)
         ConsoleMessage = 8,   // detail = every console argument stringified and space-joined (objects as
-                              // JSON); x = level (0 log, 1 warning, 2 error); y = source line. Every message,
-                              // whatever Magelight.log records of it (QueryCapability("consoleLog"), 0.31.0)
+                              // JSON, an Error as its text, the JSON of its own fields when it has any, and its
+                              // stack); x = level (0 log, 1 warning, 2 error);
+                              // y = source line. Every message, whatever Magelight.log records of it
+                              // (QueryCapability("consoleLog"), 0.31.0). Also an exception InvokeJS or an
+                              // InteropCall handler left uncaught: x = 2, detail = its text and stack
+                              // (QueryCapability("scriptErrors"), 1.5.0)
         RenderDead = 9,       // the overlay disabled itself for the session (also sent at RegisterMod if already dead)
         HostShutdown = 10,    // reserved
         UIModeRefused = 11,   // your RequestUIMode lost the race on the game thread; detail = reason
@@ -263,8 +282,9 @@ namespace MAGELIGHT_API {
     using EventFn = void (*)(const EventData* ev, void* user);
     using LogFn = void (*)(int level, const char* message, void* user);   // 0 info, 1 warning, 2 error
     using JsListenerFn4 = void (*)(ViewId view, const char* argument, void* user);
-    // EvalJS completion: result = String(completion value) ("" for undefined);
-    // exception = the thrown value's string, "" when the script succeeded.
+    // EvalJS completion: result = String(completion value) ("undefined" for undefined, "" for a value
+    // with no string form such as a Symbol); exception = the thrown value's string, "" when the script
+    // succeeded (or threw a value with no string form).
     using JsResultFn = void (*)(ViewId view, const char* result, const char* exception, void* user);
     // PostGameTask (0.30.1): runs once, on the game thread, with the user pointer it was posted with.
     using GameTaskFn = void (*)(void* user);
@@ -341,7 +361,12 @@ namespace MAGELIGHT_API {
         float heightOffset;              // metres above/below eye height
         float curvature;                 // reserved (IVROverlay_016 has no curvature)
         float autoCloseMeters;           // reserved
+        std::uint32_t flags;             // kVRPlacement* (1.6.1); an older host accepts the larger struct and ignores it
     };
+    // Place the view where the player is LOOKING, pitch included, tilted to face them (pitch held within 60 degrees
+    // of level), instead of level at eye height. Applies when the view is placed (each show, a recentre); best with
+    // WorldLocked, since a LazyFollow glide places it level again. QueryCapability("vrGaze").
+    inline constexpr std::uint32_t kVRPlacementAtGaze = 1;
 
     // Bind a view to a CONTROLLER button (VR only). Polled from the runtime
     // every frame whether or not UI mode is on — that is how a view opens with
@@ -439,6 +464,52 @@ namespace MAGELIGHT_API {
         std::uint32_t barHover;          // the title bar under the laser (host: 0xFF251D14)
     };
 
+    // ── Gamepad layer (1.6.0) ──────────────────────────────────────────────
+    // SetViewGamepad opts a view in: while it holds UI mode on flat, the pad is
+    // its page's and kept from the game. kGamepadStyleKeys types the pad as
+    // keys (south/A Enter, east/B Escape, d-pad and left stick the arrows, the
+    // right stick a mouse wheel under the pointer), so a
+    // page that works with a keyboard works with a pad; kGamepadStyleNavigation
+    // hands the page actions, which window.magelight.gamepad turns into focus
+    // moves between the controls of the scopes the page attaches (docs/SDK.md).
+    // B follows Escape's rule either way: it closes the view unless the page
+    // took Escape (SetEscapeCapture / '__escapecapture'), and then the page
+    // gets it (Escape, or the cancel action).
+    inline constexpr std::uint32_t kGamepadStyleKeys = 0;
+    inline constexpr std::uint32_t kGamepadStyleNavigation = 1;
+    inline constexpr std::uint32_t kGamepadModeNavigation = 0;
+    inline constexpr std::uint32_t kGamepadModeCursor = 1;     // the left stick moves the cursor, south/A clicks
+    inline constexpr std::uint32_t kGamepadGlyphsXbox = 0;
+    inline constexpr std::uint32_t kGamepadGlyphsPlayStation = 1;
+    inline constexpr std::uint32_t kGamepadGlyphsGeneric = 2;
+    // Controls, for GamepadConfig::bindings: 1 dpadUp, 2 dpadDown, 3 dpadLeft,
+    // 4 dpadRight, 5 start, 6 back, 7 leftThumb, 8 rightThumb, 9 leftShoulder,
+    // 10 rightShoulder, 11 south (A), 12 east (B), 13 west (X), 14 north (Y).
+    struct GamepadConfig {
+        std::uint32_t size;              // = sizeof(GamepadConfig)
+        bool enabled;                    // false = the pad is the game's again (as without a config)
+        std::uint32_t style;             // kGamepadStyle*
+        bool allowCursor;                // right-stick click toggles cursor mode
+        bool startInCursorMode;          // needs allowCursor
+        // One control per action, 0 = the default; actions in this order: up, down, left, right (default the
+        // d-pad), accept (south), cancel (east), previousTab (left shoulder), nextTab (right shoulder), secondary
+        // (west), tertiary (north), toggleCursor (right-stick click). Each control on one action at most, and a
+        // slot left 0 keeps its default control, which counts: moving a control to another action means
+        // rebinding the action that had it. No action can be left unbound.
+        std::uint8_t bindings[11];
+        std::uint8_t reserved[3];        // must be 0
+        // 1.6.0 ends here (size 28); fields a later host adds start at offset 28.
+    };
+    struct GamepadState {
+        std::uint32_t size;              // = sizeof(GamepadState), set by the caller
+        bool enabled;                    // the view opted in and the layer can run (flat, Magelight.json allows it)
+        bool connected;                  // a gamepad is connected and enabled in the game
+        bool capturing;                  // the view holds the pad right now
+        std::uint32_t mode;              // kGamepadMode*
+        std::uint32_t glyphs;            // kGamepadGlyphs*: the prompt labels the player chose
+        std::uint64_t generation;        // changes whenever the pad changes hands or reconnects
+    };
+
     // Actions for BindHotkey (one binding per DirectInput scancode, process-wide).
     inline constexpr std::uint32_t kHotkeyActionUnbind = 0;             // scancode 0 = every binding of the view
     inline constexpr std::uint32_t kHotkeyActionToggleUIMode = 1;       // RequestUIMode / ReleaseUIMode + hide
@@ -487,7 +558,10 @@ namespace MAGELIGHT_API {
         Result (*CreateViewEx)(ModId mod, const ViewDesc* desc, ViewId* outView);
         Result (*DestroyView)(ViewId view);                 // async; Busy if it is the UI-mode view
         Result (*ReloadView)(ViewId view);                  // ViewReloaded follows DOM ready
-        Result (*Navigate)(ViewId view, const char* url);   // file:/// (or a path); http = Denied
+        Result (*Navigate)(ViewId view, const char* url);   // file:/// (or a path); http = Denied. The page's
+                                                            // own URL with only its #fragment added or changed
+                                                            // keeps the page: no DOM ready, no ViewReloaded,
+                                                            // calls keep flowing (1.5.0)
         Result (*RegisterJSListenerEx)(ViewId view, const char* name, JsListenerFn4 cb, void* user);
                                                             // "magelight" and names starting "__" belong to
                                                             // the host's page script: InvalidArgument (0.30.0;
@@ -502,7 +576,9 @@ namespace MAGELIGHT_API {
         Result (*RaiseView)(ViewId view);                   // to the top of its layer
         Result (*GetViewInfo)(ViewId view, ViewDesc* out);  // v4-owned views; out->size set by caller; anchor
                                                             // reconstructed so the desc round-trips; startVisible
-                                                            // = current visibility; strings live until DestroyView
+                                                            // = current visibility; strings live until DestroyView;
+                                                            // htmlPath is UTF-8 (1.6.1; earlier hosts gave ANSI
+                                                            // for manifest and Papyrus views)
         void   (*GetDisplaySize)(std::int32_t* w, std::int32_t* h);   // 0,0 before the first frame
         std::int32_t (*QueryCapability)(const char* name);  // 1/0. Case-insensitive here. The authoritative
                                                             // name list is QueryCapability() in the host; as of
@@ -521,13 +597,27 @@ namespace MAGELIGHT_API {
                                                             // (0.31.5) "rebuildScale" (0.31.7)
                                                             // "keyboardTheme" (0.31.9), "prepaint" (0.31.11),
                                                             // "uiModeCancel" "hostThemeReply" (1.1.0),
-                                                            // "tooltips" (1.2.0). The
+                                                            // "tooltips" (1.2.0), "scriptErrors"
+                                                            // "pageVisibility" "keyboardCode"
+                                                            // "auxButtons" "imeCandidates" (1.5.0;
+                                                            // "ime" is 0 in VR from 1.5.0), "gamepad"
+                                                            // (1.6.0; 0 in VR), "vrGaze" (1.6.1), "pageThread" (1.7.0: 1 when
+                                                            // render-thread callbacks run, or once the renderer
+                                                            // starts will run, on Magelight's page thread; it can
+                                                            // turn 0 for the session when the renderer starts,
+                                                            // never back; see the threading contract; 0 in VR),
+                                                            // "mainMenu" (1.7.1: follows "pageThread"). The
                                                             // page-injected window.__MAGELIGHT__.capabilities
                                                             // (SDK: host.can) and the SDK mock carry this same
                                                             // set under the camelCase spellings shown (the page
                                                             // side is a plain key lookup).
         const char* (*GetLastErrorMessage)(ModId mod);      // per-mod storage, valid until the mod's next failing
-                                                            // call or UnregisterMod — copy it; "" if none
+                                                            // call or UnregisterMod — copy it; "" if none. Read it
+                                                            // on the thread that made the failing call, right
+                                                            // after it: with "pageThread" a failing call made from
+                                                            // a render-thread callback can replace it meanwhile
+                                                            // (ModDesc.onLog hands each message over on the
+                                                            // failing call's own thread)
         Result (*BindHotkey)(ViewId view, std::uint32_t dxScancode, std::uint32_t action);  // kHotkeyAction*; Busy names
                                                             // the mod holding the key, Denied = the host's toggle key.
                                                             // Fires on key-down outside engine menus/console/text entry;
@@ -592,22 +682,32 @@ namespace MAGELIGHT_API {
 
         // ── appended in 0.26.9 — gate on hostVersionNumber >= 2609 ──
         // Set the view's Ultralight device scale at runtime (see ViewDesc::uiScale).
-        // The page re-lays out; its devicePixelRatio becomes `scale`. On a page
-        // that has loaded this is a live re-layout inside the frame, which has
-        // crashed the game for a consumer and has not been verified since it
-        // moved to the render thread (0.28.5): use RebuildViewAtScale (0.31.7)
-        // there. Before the first load, and on a hibernated view, it only
+        // The page lays out again at the next frame and keeps its state; its
+        // devicePixelRatio becomes `scale`. Before 0.28.5 the host made the change
+        // on the caller's thread, where it crashed the game for a consumer, and it
+        // has not run in game since: on a page that has loaded, prefer
+        // RebuildViewAtScale (0.31.7) until it has. Offline it draws like a page
+        // loaded at `scale`, except from 1.5.0 (Ultralight 2.0) where the view's
+        // width or height divided by `scale` is not whole: a View resized or
+        // rescaled after it was created (this call, SetViewBounds, a fullscreen
+        // view's new size) then has its CSS size rounded up where a View created
+        // at that size and scale rounds down, so the two lay out a pixel apart
+        // (docs/CPP.md). From 1.5.0 the scale the view already has changes
+        // nothing. Before the first load, and on a hibernated view, it only
         // stores the scale for the next load. Cutout and
         // image rects are in VIEW PIXELS = CSS px * scale. Clamped 1.0..3.0 (0.5..3.0 before
         // 0.30.3; below 1 Ultralight clipped the page): shrink a page with a CSS transform.
         Result (*SetViewScale)(ViewId view, float scale);
         // ── 0.27.0 (no new fields): native IME. Text fields in the UI-mode view take
         //    CJK composition: the window's IME context attaches on field focus (the
-        //    bridge detects it — pages need NO code), the pre-edit is drawn inline as
-        //    the field's selection, the candidate list opens at the caret, and keys the
-        //    IME consumed never reach the page. A page that wants
-        //    an indicator listens for the 'magelight:ime' window event ({state, text}).
-        //    QueryCapability("ime") == 1. Flat only (VR: the runtime keyboard owns text).
+        //    host follows the page's focus — pages need NO code), the pre-edit is drawn
+        //    inline in the field, and keys the IME consumed never reach the page. No OS
+        //    IME window shows (none draws over the game): from 1.5.0 the page core draws
+        //    the candidate list in the page at the composition (opt out with
+        //    data-ml-ime="off" or by cancelling the 'magelight:ime' window event, which
+        //    carries {state, text} and from 1.5.0 the whole state: docs/CPP.md "IME").
+        //    QueryCapability("ime") == 1 and, from 1.5.0, ("imeCandidates") == 1. Flat
+        //    only (VR: the runtime keyboard owns text; both are 0 there from 1.5.0).
         // ── 0.26.11 (no new fields): RequestUIMode on the view that ALREADY holds
         //    UI mode retargets the PAUSE flag (kUIModeFlagPause) IN PLACE — the live
         //    focus menu's kPausesGame and the engine's pause counter are adjusted;
@@ -750,14 +850,18 @@ namespace MAGELIGHT_API {
         // (GetLastErrorMessage says which). Nothing is stored on a failure.
         Result (*SetViewKeyboardTheme)(ViewId view, const KeyboardTheme* theme);
         // ── appended in 0.31.11 — gate on hostVersionNumber >= 3111 and QueryCapability("prepaint") ──
-        // Paint this view once while it is hidden, about 1.5 s after its page
+        // Paint this view while it is hidden, about 1.5 s after its page
         // reaches DOM ready (again after a reload or resize), so its first show
         // composites a finished texture instead of painting the whole page in
-        // that frame. One view per frame, never on a frame already over the
-        // load budget. The texture stays allocated while the view lives (about
-        // 74 MB for a 2560x1440 view with MSAA 4x): opt in for a view the player
+        // that frame. From 1.5.0 it is painted once more when its page settles
+        // (network and layout quiet): Ultralight 2.0 decodes a page's images
+        // only once the page is painted, so the first paint has none. One view
+        // per frame, never on a frame already over the load budget. The
+        // texture stays allocated while the view lives (for a 2560x1440 view
+        // about 74 MB with MSAA 4x before 1.5.0, about 15 MB plus the page's
+        // composited layer tiles from 1.5.0): opt in for a view the player
         // opens often. A page that hides its content while hidden (display:
-        // none) gets nothing from it. The paint is still one long frame,
+        // none) gets nothing from it. Each paint is still one long frame,
         // during play; never in VR (accepted there, does nothing). A page can
         // set the same flag with magelight.send('__prepaint', '1'). Any thread;
         // InvalidView for a view that is gone or an inspector.
@@ -774,6 +878,40 @@ namespace MAGELIGHT_API {
         // ReleaseUIMode: a release while the entry waits forgets it (as before
         // 1.1.0, the entry still runs) and this then answers Denied. Any thread.
         Result (*CancelUIModeRequest)(ModId mod);
+
+        // ── appended in 1.6.0 — gate on hostVersionNumber >= 10600 and QueryCapability("gamepad") ──
+        // Opt a view in to the gamepad layer (see GamepadConfig), or out with
+        // nullptr or enabled false. Kept across reloads and hibernation, ended by
+        // DestroyView. The view holds the pad only while it holds UI mode, the
+        // page core of its current document has started, the game window has
+        // focus and no engine menu that takes menu input is open above it. Flat only: QueryCapability("gamepad")
+        // is 0 on VR (the laser) and when the player switched the layer off.
+        // A mod with its own gamepad bridge steps it aside where the capability
+        // is 1: opt the view in with kGamepadStyleKeys and stop the bridge for
+        // that view; where it is 0, keep the bridge. Any thread; *config is
+        // copied. InvalidView for a view that is gone or an inspector;
+        // InvalidArgument for a short size, an unknown style or bindings that
+        // reuse a control or name a stick or trigger (GetLastErrorMessage says
+        // which). Nothing changes on a failure.
+        Result (*SetViewGamepad)(ViewId view, const GamepadConfig* config);
+        // The view's opt-in and the pad as the host last saw it (*out filled;
+        // out->size set by the caller). Any thread. InvalidArgument for a null
+        // out or a size below the 1.6.0 struct; InvalidView for a view that is
+        // gone or an inspector.
+        Result (*GetViewGamepadState)(ViewId view, GamepadState* out);
+
+        // ── appended in 1.7.1 — gate on hostVersionNumber >= 10701 and QueryCapability("mainMenu") ──
+        // Asking for UI mode at the main menu is enough to open a view there (flat, with the page thread): the view
+        // becomes a main-menu page and Ultralight starts if it has not. So never ask there unless your page works
+        // without a world: no player, no cell. A request in the first seconds of the main menu, before the game's main
+        // thread presents it, is refused as before. This call makes a view one ahead of that: its page loads at the
+        // main menu, a shown view draws there, and a manifest or v4 hotkey opens it there (manifest "mainMenu": true
+        // does the same). A view stays one for the session; false undoes it. Any other view waits for the first
+        // in-game frame and is not drawn over the main menu. On VR or with Magelight.json "pageThread": false the call
+        // succeeds and does nothing (QueryCapability("mainMenu") is 0 there). UI mode closes when a load starts, and if
+        // the page thread cannot start; a page shown without UI mode is yours to hide when the main menu closes. Any
+        // thread. InvalidView for a view that is gone or an inspector.
+        Result (*SetViewMainMenu)(ViewId view, bool on);
     };
 
     inline constexpr std::uint32_t PackVersion(std::uint32_t major, std::uint32_t minor, std::uint32_t patch)

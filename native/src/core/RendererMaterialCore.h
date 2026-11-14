@@ -134,12 +134,48 @@ namespace Phantasm::RendererMaterialCore
 
     /// Whether a piece of a live view's colour passes draws with its back faces culled: as the game draws it, unless
     /// its shader property is kTwoSided, and never for a hair strand (thin cards whose back halves, or a whole card
-    /// wound the other way, are part of the hair as seen; the strand pass draws both sides whatever the flag says).
+    /// wound the other way, are part of the hair as seen; the strand pass draws both sides whatever the flag says,
+    /// and lights a one-sided strand's back face as StrandBackFaceReverses says).
     /// Eyes, overlays, skin decals, effects and blend pieces follow the flag like any other piece. The shadow depth
     /// pass, the floor and the particles never cull.
     inline bool CullsBackFaces(bool twoSided, bool hairStrand) noexcept
     {
         return !twoSided && !hairStrand;
+    }
+
+    // ── A strand's back face (materialParams.z) ──
+
+    /// Whether a piece's back faces are lit by their normal reversed: a hair strand of a one-sided material. The game
+    /// culls that face; the strand pass draws it (CullsBackFaces) where the game shows a front face or nothing, so it
+    /// is lit as a front face. Hair made two-sided by geometry carries a reversed copy of its triangles in the same
+    /// place, normals pointing in: lit by those, the copy shows wherever it wins the depth tie, dark on the lit side
+    /// and light on the dark one, in flakes with triangle edges. A two-sided strand's back face is one the game
+    /// draws, and keeps its normal; so does a piece drawn from both sides for a billboard or a reflected transform
+    /// (pass it as twoSided), whose winding says nothing about its facing.
+    inline bool StrandBackFaceReverses(bool twoSided, bool hairStrand) noexcept
+    {
+        return hairStrand && !twoSided;
+    }
+
+    /// The materialParams.z lane: 0 not a hair-shader piece, kHairLane one (the hair colour rule), kHairLaneReversing
+    /// one whose back faces are lit reversed (StrandBackFaceReverses). The PS reads "a hair-shader piece" as above 0.5.
+    inline constexpr float kHairLane          = 1.0f;
+    inline constexpr float kHairLaneReversing = 2.0f;
+
+    inline float HairLaneCode(bool hairMaterial, bool twoSided, bool hairStrand) noexcept
+    {
+        if (!hairMaterial) return 0.0f;
+        return StrandBackFaceReverses(twoSided, hairStrand) ? kHairLaneReversing : kHairLane;
+    }
+
+    /// The rule's per-pixel half, which PS_Main mirrors: on a back face of a kHairLaneReversing piece the vertex
+    /// normal is reversed only where it points to the far side of its own triangle (nDotFace: the interpolated
+    /// normal against the triangle's normal on the viewer's side, below 0). The triangle's facing, not the view
+    /// direction: a vertex normal bent past the view near the silhouette is still on its face's side. A card wound
+    /// the other way whose normals point out keeps them, and a front face is never touched.
+    inline bool ShadesNormalReversed(float hairLane, bool frontFace, float nDotFace) noexcept
+    {
+        return hairLane > 1.5f && !frontFace && nDotFace < 0.0f;
     }
 
     // ── Emitted alpha (pieceFlags.w, materialParams.x) ──

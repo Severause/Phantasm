@@ -131,6 +131,12 @@ namespace Phantasm
         // redraws.
         void SetFloor(std::uint32_t view, bool on);
         void SetLighting(std::uint32_t view, std::string_view preset);
+        // The "aim" hint: face points the camera at the drawn head from where the face looks, following the head as
+        // it moves; figure (or any other text) the chest-anchored orbit from the actor's heading. A change redraws.
+        void SetAim(std::uint32_t view, std::string_view aim);
+        // The "scale" hint: the view's actor drawn at this multiple of the size the game gives them, about their
+        // place, while the idle the view chose (the "idle" hint) plays them. A change redraws.
+        void SetFigureScale(std::uint32_t view, float scale);
         // The "freeze" hint: on, the view draws a still copy of the look it holds (once complete) and collects
         // nothing, through equips and rebuilds of the actor's 3D; off, it goes back to live. Game thread.
         void SetFreeze(std::uint32_t view, bool on);
@@ -230,6 +236,10 @@ namespace Phantasm
             float                      pitchDeg = 4.0f;
             MirrorLightingCore::Preset lighting = MirrorLightingCore::Preset::kHearth;
             bool                       weapons  = false;   // draw what they carry (a sheathed sword, a bow)
+            // A head shot faces the drawn head, turnDeg and pitchDeg measured from where the face looks (FaceAimCore).
+            StillShotCore::Aim         aim      = StillShotCore::Aim::kFigure;
+            // A head shot's zoom (StillShotCore::HeadBelowBone): 1 the head and shoulders, about 2 the face alone.
+            float                      zoom     = 1.0f;
         };
         // Starts a shot of a loaded actor. False, and done never called, when one cannot start now: another shot is
         // up, or the actor's 3D is not loaded. A shot needs no UI host (it publishes no image). After

@@ -21,10 +21,12 @@
 
 namespace Phantasm::ShaderContractCore
 {
-    /// The bone palette's slots (cbBones, VS b1): a skin with more bones keeps the bind-pose placement. The HLSL
-    /// sizes boneMatrices from kMaxBonesMacro, defined as kMaxBonesText at every compile.
+    /// The bone palette's slots (cbBones, VS b1): a skin with more bones keeps the bind-pose placement. 256 is every
+    /// bone one shape can address: the engine's vertex format carries a vertex's four bone indices as UINT8
+    /// (BLENDINDICES is R8G8B8A8_UINT), so a slot past 255 would never be read. The HLSL sizes boneMatrices from
+    /// kMaxBonesMacro, defined as kMaxBonesText at every compile.
     inline constexpr char kMaxBonesMacro[] = "PHANTASM_MAX_BONES";
-    inline constexpr char kMaxBonesText[]  = "128";
+    inline constexpr char kMaxBonesText[]  = "256";
 
     constexpr std::uint32_t ParseDecimal(const char* s) noexcept
     {
@@ -33,7 +35,9 @@ namespace Phantasm::ShaderContractCore
         return v;
     }
     inline constexpr std::uint32_t kMaxBones = ParseDecimal(kMaxBonesText);   // kMaxBonesText is a plain decimal
-    static_assert(ParseDecimal("128") == 128 && kMaxBones > 0);
+    static_assert(ParseDecimal("256") == 256 && kMaxBones > 0);
+    static_assert(kMaxBones <= 256, "a UINT8 bone index reaches 256 slots");
+    static_assert(kMaxBones * 4 <= 4096, "a D3D11 constant buffer holds 4096 float4");
 
     // ── Per-object constant buffer payload (cbPerObject, b0) ──
     // 5 float4x4 + 28 float4; must match the HLSL cbuffer field for field (CheckShader).

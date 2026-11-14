@@ -69,4 +69,6 @@ the menu) takes back exactly the copies it lent and puts their own clothes back 
 
 MIT. See `LICENSE`. The page ships Source Sans 3 (Adobe) under the SIL Open Font License 1.1, and is built with React,
 React DOM and Scheduler (Meta, MIT) and the Magelight SDK (MIT); their notices ship beside the page in `licenses/`. The plugin is built
-with SKSE Menu Framework 3's API header (MIT, Thiago Kaique; `native/extern/skse-menu-framework/LICENSE.txt`).
+with SKSE Menu Framework 3's API header (MIT, Thiago Kaique; `native/extern/skse-menu-framework/LICENSE.txt`), which
+carries Dear ImGui's declarations (MIT, Omar Cornut) in cimgui's wording (MIT, Stephan Dilly); the zip ships all three
+licences in `SKSE/Plugins/PhantasmShowcase/Licenses`.

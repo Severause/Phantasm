@@ -1,21 +1,25 @@
 # package.ps1 - the release zips, from a build of this checkout (docs\RELEASING.md):
 #   dist\Phantasm-<version>.zip       laid out like Data, for a mod manager or a manual install
-#   dist\Phantasm-<version>-pdb.zip   Phantasm.pdb alone, attached to the GitHub release to read crash logs
+#   dist\Phantasm-<version>-pdb.zip   Phantasm.pdb and PhantasmNRInProc.pdb, kept with the release builds to read
+#                                     crash logs (never uploaded)
 #
 #   .\package.ps1                     the build in C:\b\phantasm (PHANTASM_BUILD_DIR overrides it, as in build.ps1)
 #   .\package.ps1 -BuildDir <dir>     another build directory
 #   .\package.ps1 -Force              replace this version's zips in dist\
 #   .\package.ps1 -AllowDirty         package a checkout with uncommitted or untracked files (a test zip only)
 #   .\package.ps1 -AllowOtherTree     package a DLL another checkout built (a test zip only)
+#   .\package.ps1 -AllowNoNeural      package a build without neural rendering's PhantasmNRInProc.dll (a test zip only)
 #
 # The version is native\CMakeLists.txt's; native\vcpkg.json and the DLL's file version must agree with it. The zip holds
-# the DLL, data\ as git sees it, Phantasm's LICENSE and a VERSION.txt; never the PDB or PhantasmProbe.dll.
+# the DLL, neural rendering's PhantasmNRInProc.dll, data\ as git sees it, Phantasm's LICENSE and a VERSION.txt; never
+# a PDB or PhantasmProbe.dll.
 
 param(
     [string]$BuildDir = $(if ($env:PHANTASM_BUILD_DIR) { $env:PHANTASM_BUILD_DIR } else { "C:\b\phantasm" }),
     [switch]$Force,
     [switch]$AllowDirty,
-    [switch]$AllowOtherTree
+    [switch]$AllowOtherTree,
+    [switch]$AllowNoNeural
 )
 
 $ErrorActionPreference = "Stop"
@@ -81,6 +85,34 @@ if ($treeProblem) {
     Write-Host "WARNING: $treeProblem (-AllowOtherTree)" -ForegroundColor Yellow
 }
 
+# --- Neural rendering's library ------------------------------------------------------------------------------------
+# PhantasmNRInProc.dll is built only when PHANTASM_NR_VULKAN names Khronos's Vulkan headers (native\CMakeLists.txt), and
+# Phantasm.ini's [NeuralRendering] does nothing without it, so a release ships it. A copy in a build directory whose
+# last configure had no headers is left over from an earlier build of other sources: it is never shipped.
+$nrDll = Join-Path $BuildDir "PhantasmNRInProc.dll"
+$nrPdb = Join-Path $BuildDir "PhantasmNRInProc.pdb"
+$nrConfigured = $null
+if (Test-Path -LiteralPath $cache) {
+    $line = Select-String -LiteralPath $cache -Pattern '^PHANTASM_NR_VULKAN:[A-Z]+=(.*)$' | Select-Object -First 1
+    $nrValue = if ($line) { $line.Matches[0].Groups[1].Value.Trim() } else { "" }
+    # CMake's if() reads these values as false too, and then makes no library target.
+    $nrConfigured = [bool]($nrValue -and $nrValue -notmatch '^(0|OFF|NO|FALSE|N|IGNORE|NOTFOUND|.*-NOTFOUND)$')
+}
+$nrProblem = $null
+if ($nrConfigured -eq $false) { $nrProblem = "the build in $BuildDir was configured without PHANTASM_NR_VULKAN, so it built no PhantasmNRInProc.dll" }
+elseif (-not (Test-Path -LiteralPath $nrDll -PathType Leaf)) { $nrProblem = "$nrDll was not found" }
+elseif (-not (Test-Path -LiteralPath $nrPdb -PathType Leaf)) { $nrProblem = "$nrPdb was not found" }
+elseif ([math]::Abs(((Get-Item -LiteralPath $nrDll).LastWriteTime - (Get-Item -LiteralPath $nrPdb).LastWriteTime).TotalMinutes) -gt 2) {
+    $nrProblem = "PhantasmNRInProc.dll and PhantasmNRInProc.pdb in $BuildDir come from different links"
+}
+$shipNeural = -not $nrProblem
+if ($nrProblem) {
+    if (-not $AllowNoNeural) {
+        Fail "$nrProblem (build with PHANTASM_NR_VULKAN set, see native\build.ps1, or pass -AllowNoNeural for a test zip)"
+    }
+    Write-Host "WARNING: $nrProblem; this zip has no neural rendering (-AllowNoNeural)" -ForegroundColor Yellow
+}
+
 # --- Checkout ------------------------------------------------------------------------------------------------------
 $status = @(Invoke-Git $root @("status", "--porcelain"))
 if ($status.Count -gt 0) {
@@ -103,6 +135,10 @@ Write-Host "Packaging $versionText from $BuildDir"
 # --- Contents ------------------------------------------------------------------------------------------------------
 $entries = New-Object System.Collections.Generic.List[object]
 $entries.Add([pscustomobject]@{ Name = "SKSE/Plugins/Phantasm.dll"; Source = $dll; Text = $null })
+# In the folder "Phantasm" beside Phantasm.dll, where NeuralStills looks for it.
+if ($shipNeural) {
+    $entries.Add([pscustomobject]@{ Name = "SKSE/Plugins/Phantasm/PhantasmNRInProc.dll"; Source = $nrDll; Text = $null })
+}
 # data\ as git sees it: an ignored file (a stray zip, an editor's file) never ships, and the clean check cannot see one.
 $data = Invoke-Git $root @("-c", "core.quotepath=off", "ls-files", "--cached", "--others", "--exclude-standard", "--", "data")
 foreach ($rel in @($data)) {
@@ -115,7 +151,14 @@ $entries.Add([pscustomobject]@{ Name = "SKSE/Plugins/Phantasm/Licenses/Phantasm-
 $entries.Add([pscustomobject]@{ Name = "SKSE/Plugins/Phantasm/VERSION.txt"; Source = $null; Text = $versionText })
 
 $names = @($entries | ForEach-Object { $_.Name })
-foreach ($must in "SKSE/Plugins/Phantasm.ini", "Interface/phantasm.swf") {
+# Phantasm.dll compiles SKSE Menu Framework's API header in (the settings panel), which carries Dear ImGui's
+# declarations as cimgui words them: the three licences ship with it.
+$musts = @("SKSE/Plugins/Phantasm.ini", "Interface/phantasm.swf", "Magelight/Phantasm/views/settings/index.html",
+    "SKSE/Plugins/Phantasm/Licenses/SKSE-Menu-Framework-MIT.txt", "SKSE/Plugins/Phantasm/Licenses/Dear-ImGui-MIT.txt",
+    "SKSE/Plugins/Phantasm/Licenses/cimgui-MIT.txt")
+# PhantasmNRInProc.dll is compiled against Khronos's Vulkan headers: their licence ships with it.
+if ($shipNeural) { $musts += "SKSE/Plugins/Phantasm/Licenses/Vulkan-Headers-MIT.txt" }
+foreach ($must in $musts) {
     if ($names -notcontains $must) { Fail "data/$must is missing" }
 }
 $dupes = @($names | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
@@ -155,7 +198,10 @@ function Write-Zip([string]$path, $items) {
 }
 
 Write-Zip $zipPath $entries
-Write-Zip $pdbZipPath @([pscustomobject]@{ Name = "Phantasm.pdb"; Source = $pdb; Text = $null })
+$pdbEntries = New-Object System.Collections.Generic.List[object]
+$pdbEntries.Add([pscustomobject]@{ Name = "Phantasm.pdb"; Source = $pdb; Text = $null })
+if ($shipNeural) { $pdbEntries.Add([pscustomobject]@{ Name = "PhantasmNRInProc.pdb"; Source = $nrPdb; Text = $null }) }
+Write-Zip $pdbZipPath $pdbEntries
 
 foreach ($z in $zipPath, $pdbZipPath) {
     Write-Host ""

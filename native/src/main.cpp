@@ -8,6 +8,9 @@
 #include "Host.h"
 #include "MannequinRenderer.h"
 #include "PresentHandoff.h"
+#include "Settings.h"
+#include "SettingsPage.h"
+#include "SettingsPanel.h"
 
 #include <cctype>
 #include <cstdio>
@@ -76,85 +79,15 @@ namespace
 
     void OnRevert(SKSE::SerializationInterface*) { Phantasm::Host::OnRevert(); }
 
-    // Data/SKSE/Plugins/Phantasm.ini, [LiveViews]: Budget = smooth | balanced | light, BudgetMs = a number (0 = the
-    // mode's). The path is from the game's own folder, whatever the working folder a launcher left; a plain file read,
-    // so MO2's virtual folder serves it. A missing file keeps the defaults.
-    std::filesystem::path SettingsPath()
-    {
-        std::wstring buf(MAX_PATH, L'\0');
-        for (;;) {
-            const DWORD n = ::GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
-            if (n == 0) return "Data/SKSE/Plugins/Phantasm.ini";
-            if (n < buf.size()) {
-                buf.resize(n);
-                break;
-            }
-            buf.resize(buf.size() * 2);
-        }
-        return std::filesystem::path(buf).parent_path() / L"Data" / L"SKSE" / L"Plugins" / L"Phantasm.ini";
-    }
-
-    void LoadSettings()
-    {
-        std::string mode;
-        double      ms = 0.0;
-        const auto  path = SettingsPath();
-        if (std::ifstream in{ path }) {
-            std::string line, section;
-            bool        sawSection = false;
-            bool        first      = true;
-            auto        trim = [](std::string s) {
-                const auto a = s.find_first_not_of(" \t\r");
-                const auto b = s.find_last_not_of(" \t\r");
-                return a == std::string::npos ? std::string{} : s.substr(a, b - a + 1);
-            };
-            auto lower = [](std::string s) {
-                for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                return s;
-            };
-            while (std::getline(in, line)) {
-                if (std::exchange(first, false) && line.starts_with("\xEF\xBB\xBF")) line.erase(0, 3);   // a UTF-8 BOM
-                line = trim(line);
-                if (line.empty() || line[0] == ';' || line[0] == '#') continue;
-                // A section header, a comment after it allowed ("[LiveViews] ; ...").
-                if (line.front() == '[') {
-                    const auto close = line.find(']');
-                    if (close != std::string::npos) {
-                        section = lower(trim(line.substr(1, close - 1)));
-                        sawSection |= section == "liveviews";
-                        continue;
-                    }
-                }
-                const auto eq = line.find('=');
-                if (section != "liveviews" || eq == std::string::npos) continue;
-                const auto key   = lower(trim(line.substr(0, eq)));
-                auto       value = trim(line.substr(eq + 1));
-                if (const auto c = value.find_first_of(";#"); c != std::string::npos) value = trim(value.substr(0, c));
-                if (key == "budget") mode = value;
-                else if (key == "budgetms") {
-                    try {
-                        ms = std::stod(value);
-                    } catch (...) {
-                        SKSE::log::warn("Phantasm.ini: BudgetMs '{}' is not a number", value);
-                    }
-                }
-            }
-            if (!sawSection) SKSE::log::warn("Phantasm.ini has no [LiveViews] section: the default budget");
-        } else {
-            // u8string: string() throws on a game folder name the ANSI code page cannot spell.
-            const auto shown = path.u8string();
-            SKSE::log::info("Phantasm.ini not found at {}: the default budget",
-                            std::string(reinterpret_cast<const char*>(shown.c_str()), shown.size()));
-        }
-        Phantasm::MannequinRenderer::GetSingleton()->SetLiveBudget(mode, ms);
-    }
-
     void OnMessage(SKSE::MessagingInterface::Message* m)
     {
         switch (m->type) {
         case SKSE::MessagingInterface::kDataLoaded:
-            LoadSettings();
+            Phantasm::Settings::Load();
             Phantasm::MannequinRenderer::RegisterCarriers();
+            // The two settings pages, each only where its host is installed.
+            Phantasm::SettingsPanel::Initialize();
+            Phantasm::SettingsPage::Initialize();
             break;
         default:
             break;

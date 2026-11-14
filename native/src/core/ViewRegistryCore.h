@@ -247,15 +247,30 @@ namespace Phantasm::ViewRegistryCore
     }
 
     /// One other actor of a view's scene (the "scene" hint): who, the idle they play there (the idle hint's forms),
-    /// and where, from the view's own actor: x along their facing, y to their right, z up (game units), r degrees
-    /// turned clockwise seen from above.
+    /// where, from the view's own actor: x along their facing, y to their right, z up (game units), r degrees
+    /// turned clockwise seen from above; and the size they are drawn at (FigureScaleHint).
     struct SceneCastEntry
     {
         std::uint32_t actor = 0;
         std::string   idle;
         float         x = 0.0f, y = 0.0f, z = 0.0f, r = 0.0f;
+        float         scale = 1.0f;
     };
     inline constexpr std::size_t kMaxSceneCast = 3;
+
+    /// The size an actor is drawn at (the "scale" hint, a scene entry's last field), as a multiple of the size the
+    /// game gives them: a positive number held to kMinFigureScale..kMaxFigureScale; 1 for none or anything else.
+    inline constexpr float kMinFigureScale = 0.5f;
+    inline constexpr float kMaxFigureScale = 2.0f;
+    inline float FigureScaleHint(std::string_view value)
+    {
+        const std::string s(AsciiText::Trim(value));
+        if (s.empty()) return 1.0f;
+        char*       end = nullptr;
+        const float v   = std::strtof(s.c_str(), &end);
+        if (end != s.c_str() + s.size() || !std::isfinite(v) || v <= 0.0f) return 1.0f;
+        return std::clamp(v, kMinFigureScale, kMaxFigureScale);
+    }
 
     namespace HintFields
     {
@@ -300,10 +315,11 @@ namespace Phantasm::ViewRegistryCore
         }
     }
 
-    /// The "scene" hint's entries: "<FormID in hex>|<idle>|<x,y,z,r>", separated by ';' (the offset may be left off;
-    /// spaces around a field are dropped). An entry with no FormID, the view's own actor (self), a repeat, no clip
-    /// to play (no idle, or still: an extra is drawn only in its clip's pose) or one past kMaxSceneCast is left out;
-    /// an offset that is not four finite numbers leaves the entry at the origin.
+    /// The "scene" hint's entries: "<FormID in hex>|<idle>|<x,y,z,r>|<scale>", separated by ';' (the offset and
+    /// the scale may be left off; spaces around a field are dropped). An entry with no FormID, the view's own actor
+    /// (self), a repeat, no clip to play (no idle, or still: an extra is drawn only in its clip's pose) or one past
+    /// kMaxSceneCast is left out; an offset that is not four finite numbers leaves the entry at the origin, and a
+    /// scale that is no positive number leaves it at its own size.
     inline std::vector<SceneCastEntry> SceneCastHint(std::string_view value, std::uint32_t self)
     {
         std::vector<SceneCastEntry> out;
@@ -324,6 +340,7 @@ namespace Phantasm::ViewRegistryCore
                 e.z = v[2];
                 e.r = v[3];
             }
+            if (fields.size() > 3) e.scale = FigureScaleHint(fields[3]);
             out.push_back(std::move(e));
         }
         return out;

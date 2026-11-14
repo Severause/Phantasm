@@ -1,8 +1,63 @@
 # Changelog
 
 Phantasm follows semantic versioning from 1.0.0 ([docs/API.md](docs/API.md), Compatibility). 0.2.0, 0.3.0 and 0.4.0
-reached players inside SeverActions; 0.5.0 was never released and became 1.0.0. A client tells versions apart by
-`Interface1::pluginVersion` (MAJOR*10000 + MINOR*100 + PATCH).
+reached players inside SeverActions; 0.5.0 was never released and became 1.0.0. 1.1.0 was only ever a test build and
+became 1.2.0: `docs/API.md` and the header still give the `aim`, `zoom` and `scale` hints as added in 1.1.0 and gate
+them on `pluginVersion >= 10100`, which 1.2.0 passes. A client tells versions apart by `Interface1::pluginVersion`
+(MAJOR*10000 + MINOR*100 + PATCH).
+
+## 1.2.0 - 2026-11-13
+
+For players:
+
+- With a first-person body mod (Improved Camera), a view of the player taken in first person no longer shows a neck
+  that ends in a point, missing arms or missing weapons on the back. Such a mod shrinks those parts of the player's
+  body for the game's own picture; Phantasm now draws them from the body's own pose.
+- A body with more than 128 bones (a soft-body UBE body used with Bone Limit Extender, for one) is posed with the
+  rest of the character, instead of standing in its modelled pose while the head, hands and feet follow the
+  skeleton. Phantasm now skins a piece with up to 256 bones, the most one piece can use.
+- Hair built from doubled triangles (each one in the mesh twice, facing out and facing in, as in many Sims 4
+  conversions) no longer shows dark, hard-edged flakes on its lit side and light ones on its dark side in a live view
+  or a still: the copy that faces in is now lit like the one that faces out.
+- Phantasm's settings can be changed in the game, and a change holds at once: in SKSE Menu Framework's Mod Control
+  Panel (Phantasm > Settings), or, with Magelight UI, on the page Scroll Lock opens (either page changes that key).
+  Both say whether neural rendering is running, and why not, and both write the changes back to
+  `Phantasm.ini`, whose comments stay. Both are optional: without either, the file is edited as before.
+- Experimental: `Phantasm.ini [NeuralRendering] Enabled = 1`, or the switch on a settings page, runs NVIDIA DLSS NR
+  (the neural rendering of DLSS 5) on the pictures mods ask Phantasm to take of a character (a Cutout or a Portrait
+  still), from the `nvngx_dlssnr.dll` you already have. `Folder = auto`, as the file ships, finds the copy your
+  neural rendering mod installed (the one it has loaded, else the
+  first under `Data/SKSE/Plugins`, `Data/Shaders` or the game's folder, a copy under the mod's own file name
+  included, such as Theo's Render Pipeline's `nvngx_dlssnr_int8.dll`); a path names the folder or the file to use. It
+  runs inside the game, from Phantasm's own `PhantasmNRInProc.dll`, which holds no code of NVIDIA's and needs
+  nothing installed beyond your graphics driver. It starts while the game loads to its main menu, works from a copy
+  of the library of its own (150 to 300 MB under `%LOCALAPPDATA%\Phantasm\NR`), so your mod's own use of the library
+  is left alone, and keeps other programs' Vulkan overlays and capture hooks out of the game. A library that is slow
+  to start then holds the game for that long, and `Phantasm.log` names it. It takes the settings you chose in that
+  mod (its NR switch, style and strengths, for Skyrim Upscaler, Theo's Render Pipeline and Open Shaders;
+  `Follow = 0` uses `Phantasm.ini`'s). An NVIDIA-signed copy runs through NVIDIA's loader on the GPUs it was made
+  for; an unsigned copy (a community build for an older GPU) is loaded directly unless `Unsigned = 0`. `Model`,
+  `Intensity`, `Tone`, `Structure`, `Skin` and `Passes` tune it. `LiveViews`, on as the file ships, runs it on a
+  character's live view too (one view at a time), at `LiveScale` of its picture's size: a few milliseconds of GPU
+  time each frame it draws. Item pictures are unchanged. It keeps several hundred MB of the game's memory while it
+  runs.
+
+For mod authors:
+
+- The `aim` hint for actor views: `face` keeps the camera on the actor's face, taking the front from where their head
+  looks rather than from their heading, so an actor an animation turns around or lays down (one partner of a paired
+  animation) is still seen face on, crown up. It follows the head as the animation moves it; `Orbit` turns the camera
+  from the face and `Zoom` closes on it. `RequestStillHinted` takes `aim=face` for a Portrait.
+- The `zoom` still hint for a Portrait (0.5 to 3): about 2 frames the face alone, for a badge or a round avatar, with
+  the crown kept in the picture.
+- The `scale` hint for actor views, and a fourth field of a `scene` entry: an actor drawn at a multiple of their own
+  size (0.5 to 2) while a clip plays them, about the spot they stand on. A paired animation is made for figures of
+  one size, and a mod that plays it in the game resizes its actors to that size; a client can now show them the same
+  way, so a tall and a short actor meet where the animation has them meet.
+- A Portrait of an actor whose pose is still moving (the start of an animation) aims at their head where it is when
+  the picture is taken, not where it was when their look was read.
+- The head bone a view anchors the face and hair on is the skeleton's own, also when a worn piece (a wig with its own
+  physics tree) carries a node of the same name.
 
 ## 1.0.0 - 2026-11-08
 

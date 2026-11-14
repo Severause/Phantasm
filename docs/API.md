@@ -86,7 +86,8 @@ it yourself (a PNG file, a data URL).
 - `RequestStill` with `Framing::Cutout` or `Framing::Portrait`: the actor drawn on their own (whole figure, or head and
   shoulders) in their standing idle, on a transparent ground (premultiplied alpha). `standingPx` is the figure's
   standing height in pixels.
-- `RequestStillHinted`: the same with still hints (`turn`, `lighting`, `pitch`, `weapons`).
+- `RequestStillHinted`: the same with still hints (`turn`, `lighting`, `pitch`, `weapons`, and since 1.1.0 `aim` and
+  `zoom` for a Portrait).
 - `RequestItemStill`: an item's model on its own, with hints (`turn`, `pitch`, `worn`).
 - `CancelStill` ends a Cutout, Portrait or item still that has not answered yet.
 
@@ -113,6 +114,11 @@ does not answer replies `{"known":false}`.
 | The `freeze` hint and query (actor views) | 1.0.0 | `QueryHint(view, "freeze")` answers `"known": true`; an older build answers `{"known":false}` |
 | The `stats` query | 1.0.0 | `QueryHint(view, "stats")` answers `"known": true`; an older build answers `{"known":false}` |
 | The `idles` answer's refusal `reason` and `pending` | 1.0.0 | `pluginVersion >= 10000` |
+| The `aim` hint (actor views) and `aim` still hint (Portrait) | 1.1.0 | `pluginVersion >= 10100` (an older build ignores the hint) |
+| The `zoom` still hint (Portrait) | 1.1.0 | `pluginVersion >= 10100` (an older build ignores the hint) |
+| The `scale` hint (actor views) and a `scene` entry's scale | 1.1.0 | `pluginVersion >= 10100` (an older build ignores both) |
+
+1.1.0 was a test build only: 1.2.0 is the first release with what this table gives as 1.1.0. Gate on the number shown.
 
 ## Compatibility
 

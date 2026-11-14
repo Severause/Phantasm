@@ -37,6 +37,25 @@ namespace Phantasm::StillShotCore
         return true;
     }
 
+    /// What an actor view's or a Portrait still's camera looks at (the `aim` hint): the figure (its chest anchor, the
+    /// front taken from the actor's heading) or the face (the drawn head, the front taken from where it looks,
+    /// FaceAimCore).
+    enum class Aim : std::uint8_t
+    {
+        kFigure = 0,
+        kFace   = 1,
+    };
+
+    /// An `aim` value (a still's hint or an actor view's): face or figure; any case. False for another word, which
+    /// leaves `out` alone.
+    inline bool ParseAim(std::string_view value, Aim& out) noexcept
+    {
+        if (AsciiText::EqualsI(value, "face")) out = Aim::kFace;
+        else if (AsciiText::EqualsI(value, "figure")) out = Aim::kFigure;
+        else return false;
+        return true;
+    }
+
     /// What a still's hints asked for. A field the hints did not set keeps the shot's own default.
     struct Hints
     {
@@ -49,7 +68,17 @@ namespace Phantasm::StillShotCore
         bool                      hasPitch    = false;
         float                     pitchDeg    = 0.0f;   // camera above level, [-kMaxPitchDeg, kMaxPitchDeg]
         Worn                      worn        = Worn::kGround;   // an item shot's model (only an armor's changes)
+        Aim                       aim         = Aim::kFigure;    // a Portrait shot's camera (a Cutout's ignores it)
+        bool                      hasZoom     = false;
+        float                     zoom        = 1.0f;   // a Portrait shot's, [kMinZoom, kMaxZoom] (a Cutout's ignores it)
     };
+
+    /// A Portrait shot's zoom: 1 frames the head and shoulders, about 2 the face alone.
+    inline constexpr float kMinZoom = 0.5f;
+    inline constexpr float kMaxZoom = 3.0f;
+
+    /// zoom within its range; 1 for a value that is not finite.
+    inline float ClampZoom(float zoom) noexcept { return std::isfinite(zoom) ? std::clamp(zoom, kMinZoom, kMaxZoom) : 1.0f; }
 
     /// The steepest a shot's camera looks down or up.
     inline constexpr float kMaxPitchDeg = 80.0f;
@@ -74,8 +103,9 @@ namespace Phantasm::StillShotCore
     /// "key=value" pairs separated by ';', keys any case. Known keys: `turn` (degrees from the front; a camera on the
     /// figure's left at 90), `pitch` (degrees above level, clamped to kMaxPitchDeg), `lighting` (a lighting hint
     /// preset id, any case, but not "here": a shot reads no game light), `weapons` (on / off: draw what the actor
-    /// carries) and `worn` (male / female / off: an armor's item shot draws the armor as worn by a man or a woman, off
-    /// its ground model). An unknown key, a pair with no '=', a number that is not finite, an unknown preset and an unknown
+    /// carries), `aim` (face / figure: a Portrait shot faces the drawn head, its turn and pitch measured from where the
+    /// face looks), `zoom` (a Portrait shot's, clamped to kMinZoom..kMaxZoom: HeadBelowBone) and `worn` (male / female /
+    /// off: an armor's item shot draws the armor as worn by a man or a woman, off its ground model). An unknown key, a pair with no '=', a number that is not finite, an unknown preset and an unknown
     /// on/off word are ignored, so a newer client's hint costs nothing on an older build.
     inline Hints Parse(std::string_view text) noexcept
     {
@@ -116,6 +146,14 @@ namespace Phantasm::StillShotCore
                 }
             } else if (AsciiText::EqualsI(key, "worn")) {
                 ParseWorn(value, h.worn);
+            } else if (AsciiText::EqualsI(key, "aim")) {
+                ParseAim(value, h.aim);
+            } else if (AsciiText::EqualsI(key, "zoom")) {
+                float v = 0.0f;
+                if (number(v)) {
+                    h.hasZoom = true;
+                    h.zoom    = ClampZoom(v);
+                }
             } else if (AsciiText::EqualsI(key, "lighting")) {
                 for (std::size_t i = 0; i < MirrorLightingCore::kPresetIds.size(); ++i) {
                     if (static_cast<MirrorLightingCore::Preset>(i) == MirrorLightingCore::Preset::kHere) continue;
@@ -141,25 +179,13 @@ namespace Phantasm::StillShotCore
     /// kHeadTargetLift; one further forward (a horse's, a dragon's) is aimed at, kHeadBelowBone under the bone.
     inline constexpr float kHumanoidHeadReach = 15.0f;
     inline constexpr float kHeadBelowBone     = 6.0f;
+    /// The head shot's vertical FOV: the actor view's.
+    inline constexpr float kHeadShotFovDeg = 35.0f;
 
     struct V3
     {
         float x = 0.0f, y = 0.0f, z = 0.0f;
     };
-
-    /// Where a head shot's camera looks, from the chest anchor (which stands chestUnits x figure over the feet), in
-    /// world units. headOffset: the drawn head bone from the actor's position, NaN when it has none.
-    inline V3 HeadShotTarget(V3 headOffset, float figure, float chestUnits) noexcept
-    {
-        const V3 humanoid{ 0.0f, 0.0f, kHeadTargetLift * figure };
-        if (!std::isfinite(headOffset.x) || !std::isfinite(headOffset.y) || !std::isfinite(headOffset.z)) return humanoid;
-        if (std::hypot(headOffset.x, headOffset.y) <= kHumanoidHeadReach * figure) return humanoid;
-        return { headOffset.x, headOffset.y, headOffset.z - (chestUnits + kHeadBelowBone) * figure };
-    }
-
-    /// How long the actor view stays up after a shot, so a following shot of the same actor (another turn, the head)
-    /// reuses its collect instead of loading them again.
-    inline constexpr int kShotLingerMs = 1500;
 
     /// The visible height at `distance` for a vertical FOV of fovDeg (both in the same units).
     inline float VisibleHeight(float distance, float fovDeg) noexcept
@@ -167,6 +193,30 @@ namespace Phantasm::StillShotCore
         constexpr float kPi = 3.14159265358979f;
         return 2.0f * distance * std::tan(fovDeg * 0.5f * kPi / 180.0f);
     }
+
+    /// How far under the head bone a head shot's camera looks at `zoom` (figure units; the camera stands
+    /// kHeadDistance / zoom away): kHeadBelowBone at 1. A closer shot keeps the frame's top edge where it was, over
+    /// the crown, and closes from below, so its centre rises onto the face; a wider one takes in more below.
+    inline float HeadBelowBone(float zoom) noexcept
+    {
+        const float half = VisibleHeight(kHeadDistance, kHeadShotFovDeg) * 0.5f;
+        return kHeadBelowBone + half * (1.0f / ClampZoom(zoom) - 1.0f);
+    }
+
+    /// Where a head shot's camera looks, from the chest anchor (which stands chestUnits x figure over the feet), in
+    /// world units. headOffset: the drawn head bone from the actor's position, NaN when it has none. zoom: the shot's.
+    inline V3 HeadShotTarget(V3 headOffset, float figure, float chestUnits, float zoom = 1.0f) noexcept
+    {
+        const float below = HeadBelowBone(zoom);
+        const V3    humanoid{ 0.0f, 0.0f, (kHeadTargetLift + kHeadBelowBone - below) * figure };
+        if (!std::isfinite(headOffset.x) || !std::isfinite(headOffset.y) || !std::isfinite(headOffset.z)) return humanoid;
+        if (std::hypot(headOffset.x, headOffset.y) <= kHumanoidHeadReach * figure) return humanoid;
+        return { headOffset.x, headOffset.y, headOffset.z - (chestUnits + below) * figure };
+    }
+
+    /// How long the actor view stays up after a shot, so a following shot of the same actor (another turn, the head)
+    /// reuses its collect instead of loading them again.
+    inline constexpr int kShotLingerMs = 1500;
 
     // ── The item shot (RequestItemStill) ──
     /// How long an item shot's model, effects and particles get before it is taken, and when it is given up.

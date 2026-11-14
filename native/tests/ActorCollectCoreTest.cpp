@@ -5,6 +5,8 @@
 #include "ActorCollectCore.h"
 #include "TestHarness.h"
 
+#include <limits>
+
 namespace Phantasm::Tests
 {
     void RunActorCollectCoreTests()
@@ -212,5 +214,34 @@ namespace Phantasm::Tests
               "unbound: a VR portrait follows the portrait rule");
         Check(AC::ClassicForUnbound(false, false, 30, 7, 0) && AC::ClassicForUnbound(false, true, 30, 0, 0),
               "unbound: with no skin bound a view and a portrait take the classic pose");
+
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        Check(AC::TakesChain(false, 0.001f, 1.0f, 1.0f),
+              "shrunk world: a head left at a thousandth while its local says 1 takes its chain");
+        Check(AC::TakesChain(false, 0.0012f, 1.2f, 1.0f) && AC::TakesChain(false, 0.0005f, 1.0f, 0.5f),
+              "shrunk world: on a scaled actor, and on a bone with a scale of its own");
+        Check(!AC::TakesChain(false, 0.001f, 1.0f, 0.001f) && !AC::TakesChain(false, 0.0f, 1.0f, 0.0f),
+              "shrunk world: a node its own local hides stays hidden");
+        Check(!AC::TakesChain(false, -0.01f, 1.0f, -0.01f),
+              "shrunk world: a negative local scale (a severed limb's bone) is another mod's hide");
+        Check(!AC::TakesChain(false, 1.0f, 1.0f, 1.0f) && !AC::TakesChain(false, 0.6f, 1.0f, 1.0f),
+              "shrunk world: a world that is not small is the game's");
+        Check(!AC::TakesChain(false, 0.03f, 0.05f, 1.0f),
+              "shrunk world: a small world that agrees with its locals is a small actor's");
+        Check(!AC::TakesChain(false, 0.001f, 0.001f, 1.0f),
+              "shrunk world: a node whose parent's world is the shrunk one is not the node that was shrunk");
+        Check(AC::TakesChain(true, 0.001f, 0.001f, 1.0f) && AC::TakesChain(true, 0.0f, 0.001f, 0.0f),
+              "shrunk world: under a parent that took its chain, a world at the scale it hands down is the same shrink");
+        Check(AC::TakesChain(true, 0.005f, 0.001f, 5.0f),
+              "shrunk world: and so is one its own local scale enlarges");
+        Check(!AC::TakesChain(true, 1.0f, 0.001f, 1.0f) && !AC::TakesChain(true, 0.04f, 0.001f, 1.0f),
+              "shrunk world: a world written since under such a parent (a physics bone) stays");
+        Check(!AC::TakesChain(true, 0.06f, 0.001f, 60.0f),
+              "shrunk world: a world that is not small is never replaced, whatever its parent");
+        Check(!AC::TakesChain(true, -0.00001f, 0.001f, -0.01f) && !AC::SmallWorld(-0.01f),
+              "shrunk world: a negative world is never replaced");
+        Check(!AC::TakesChain(false, nan, 1.0f, 1.0f) && !AC::TakesChain(true, nan, 1.0f, 1.0f) &&
+                  !AC::TakesChain(false, 0.001f, nan, 1.0f) && !AC::TakesChain(false, 0.001f, 1.0f, nan),
+              "shrunk world: a scale that cannot be read replaces nothing");
     }
 }

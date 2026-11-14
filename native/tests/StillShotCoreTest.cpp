@@ -77,6 +77,15 @@ namespace Phantasm::Tests
             Check(SS::ParseWorn("GROUND", w) && w == SS::Worn::kGround, "view hint: worn ground, any case");
         }
         {
+            Check(SS::Parse("").aim == SS::Aim::kFigure, "still: a shot aims at the figure by default");
+            Check(SS::Parse("turn=20;Aim=FACE").aim == SS::Aim::kFace, "still: aim face is read, any case");
+            Check(SS::Parse("aim=face;aim=figure").aim == SS::Aim::kFigure, "still: aim figure is read");
+            Check(SS::Parse("aim=feet").aim == SS::Aim::kFigure, "still: an unknown aim word is ignored");
+            SS::Aim a = SS::Aim::kFace;
+            Check(!SS::ParseAim("", a) && a == SS::Aim::kFace, "view hint: an empty aim value changes nothing");
+            Check(SS::ParseAim("Figure", a) && a == SS::Aim::kFigure, "view hint: aim figure, any case");
+        }
+        {
             const SS::ShotKey sword{ true, 0x1D4ED };
             const SS::ShotKey cuirassM{ true, 0x136D5, false, SS::Worn::kMale };
             const SS::ShotKey cuirassF{ true, 0x136D5, false, SS::Worn::kFemale };
@@ -119,6 +128,34 @@ namespace Phantasm::Tests
         {
             const auto t = SS::HeadShotTarget({ NAN, 0.0f, 0.0f }, 1.0f, 75.0f);
             Check(t.z == SS::kHeadTargetLift, "still: no head bone frames as a humanoid");
+        }
+
+        // ── The head shot's zoom ──
+        {
+            Check(!SS::Parse("").hasZoom && SS::Parse("").zoom == 1.0f, "still: a shot is not zoomed by default");
+            const auto h = SS::Parse("aim=face;Zoom=1.8");
+            Check(h.hasZoom && h.zoom == 1.8f && h.aim == SS::Aim::kFace, "still: zoom is read, any case");
+            Check(SS::Parse("zoom=40").zoom == SS::kMaxZoom && SS::Parse("zoom=0").zoom == SS::kMinZoom,
+                  "still: zoom is clamped to its range");
+            Check(!SS::Parse("zoom=near").hasZoom && !SS::Parse("zoom=nan").hasZoom, "still: a zoom that is no number is ignored");
+            Check(SS::ClampZoom(NAN) == 1.0f, "still: a zoom that is not finite is 1");
+
+            Check(SS::HeadBelowBone(1.0f) == SS::kHeadBelowBone, "still: at zoom 1 the head shot looks where it always did");
+            // The frame's top edge, over the head bone: the same at every zoom.
+            const float half = SS::VisibleHeight(SS::kHeadDistance, SS::kHeadShotFovDeg) * 0.5f;
+            const auto  edge = [half](float zoom) { return half / zoom - SS::HeadBelowBone(zoom); };
+            Check(std::fabs(edge(2.0f) - edge(1.0f)) < 0.001f && std::fabs(edge(0.5f) - edge(1.0f)) < 0.001f,
+                  "still: a zoom keeps the frame's top edge over the crown");
+            Check(SS::HeadBelowBone(2.0f) < 0.0f && SS::HeadBelowBone(2.0f) > -8.0f,
+                  "still: zoomed in, the frame centres on the face, over the head bone");
+            Check(SS::HeadBelowBone(0.5f) > SS::kHeadBelowBone, "still: zoomed out, the frame takes in more below");
+
+            const auto humanoid = SS::HeadShotTarget({ 0.0f, 0.0f, 120.0f }, 1.0f, 75.0f, 2.0f);
+            Check(std::fabs(humanoid.z - (120.0f - 75.0f - SS::HeadBelowBone(2.0f))) < 0.001f,
+                  "still: a zoomed humanoid head shot rises by what the bone's offset fell");
+            const auto creature = SS::HeadShotTarget({ 60.0f, 0.0f, 150.0f }, 1.2f, 75.0f, 2.0f);
+            Check(std::fabs(creature.z - (150.0f - (75.0f + SS::HeadBelowBone(2.0f)) * 1.2f)) < 0.001f,
+                  "still: a zoomed creature head shot is aimed under the bone by the zoom's offset");
         }
     }
 }

@@ -196,8 +196,8 @@ namespace PHANTASM_API
         /// Turns the camera around the actor: dx degrees of yaw, dy pixels of pointer travel for pitch (a drag).
         /// A NaN or infinite number is BadArgument.
         Result (*Orbit)(ViewId view, float dx, float dy);
-        /// Zooms toward the point (u, v) of the picture, 0..1 from the top left; dz is a wheel's deltaY. A NaN or
-        /// infinite number is BadArgument.
+        /// Zooms toward the point (u, v) of the picture, 0..1 from the top left (toward the face, whatever u and v,
+        /// while the `aim` hint is face); dz is a wheel's deltaY. A NaN or infinite number is BadArgument.
         Result (*Zoom)(ViewId view, float dz, float u, float v);
         /// The actor's look changed (an equip, a preset): the view takes it on its next frame.
         Result (*Refresh)(ViewId view);
@@ -258,7 +258,10 @@ namespace PHANTASM_API
         /// turn; the default is a slight turn), `lighting` (a lighting hint preset: studio, daylight, hearth,
         /// torchlight, moonlight; the default is hearth), and since 0.2.0 `pitch` (degrees above level, at most 80
         /// either way; the default is a little above) and `weapons` (on / off: draw what they carry; off by
-        /// default); a Figure still takes the view's own camera and light and ignores them. hints may be null.
+        /// default), and since 1.1.0, for a Portrait only, `aim` (face: the camera faces the actor's head from where
+        /// it looks, turn and pitch measured from there; figure, the default, from their heading) and `zoom` (0.5 to
+        /// 3: 1, the default, frames the head and shoulders, about 2 the face alone, the crown kept in the frame); a
+        /// Figure still takes the view's own camera and light and ignores them. hints may be null.
         /// Since 0.2.0 shots wait in a queue behind the one running ("busy" only past 32 waiting), and shots of one
         /// actor in a row share its loaded look, so ask for every angle at once. Added after Interface1's first
         /// build: check `size` first.

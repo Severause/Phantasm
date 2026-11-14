@@ -6,7 +6,7 @@ endif()
 
 project(
     Phantasm
-    VERSION 1.0.0
+    VERSION 1.2.0
     LANGUAGES CXX
 )
 
@@ -29,6 +29,7 @@ if(PHANTASM_BUILD_TESTS)
         tests/CastingArtCoreTest.cpp
         tests/CompanionCutoutCoreTest.cpp
         tests/ControllerKeysCoreTest.cpp
+        tests/FaceAimCoreTest.cpp
         tests/FaceMorphCoreTest.cpp
         tests/HkxPackfileCoreTest.cpp
         tests/ImageHostProbeCoreTest.cpp
@@ -45,11 +46,16 @@ if(PHANTASM_BUILD_TESTS)
         tests/MannequinSpringCoreTest.cpp
         tests/MirrorCameraCoreTest.cpp
         tests/MirrorLightingCoreTest.cpp
+        tests/NeuralLayerCoreTest.cpp
+        tests/NeuralSettingsCoreTest.cpp
+        tests/NeuralSourceCoreTest.cpp
+        tests/NeuralStillCoreTest.cpp
         tests/NifParticleCoreTest.cpp
         tests/PresentHandoffCoreTest.cpp
         tests/RendererFxCoreTest.cpp
         tests/RendererMaterialCoreTest.cpp
         tests/RestPoseCoreTest.cpp
+        tests/SettingsCoreTest.cpp
         tests/ShaderContractCoreTest.cpp
         tests/StillShotCoreTest.cpp
         tests/ViewRegistryCoreTest.cpp
@@ -95,6 +101,13 @@ add_library(${PROJECT_NAME} SHARED
     src/Api.cpp
     src/Host.cpp
     src/MannequinRenderer.cpp
+    src/NeuralInProc.cpp
+    src/NeuralLive.cpp
+    src/NeuralSource.cpp
+    src/NeuralStills.cpp
+    src/Settings.cpp
+    src/SettingsPage.cpp
+    src/SettingsPanel.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/version.rc
 )
 
@@ -119,6 +132,11 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../api
 )
 
+# SKSE Menu Framework 3's API header (MIT, extern/skse-menu-framework/LICENSE.txt), copied unchanged from
+# QTR-Modding/SKSE-Menu-Framework-3-Example aa8effa; a system include, so its own warnings stay out of the build. It
+# carries Dear ImGui's declarations in cimgui's wording (both MIT; data/SKSE/Plugins/Phantasm/Licenses).
+target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/extern/skse-menu-framework)
+
 target_link_libraries(${PROJECT_NAME} PRIVATE
     CommonLibSSE::CommonLibSSE
     nlohmann_json::nlohmann_json
@@ -126,6 +144,28 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     d3dcompiler.lib
     delayimp.lib
 )
+
+# Neural rendering's own library (PhantasmNRInProc.dll, nr/), which Phantasm.dll loads into the game when Phantasm.ini
+# turns it on (src/NeuralInProc.h): NVIDIA DLSS NR through the graphics driver's NGX core, or through the feature
+# library's own entry points for a copy that core does not take. Both are found on the player's machine and called by
+# export name (nr/Ngx.h, Phantasm's own statement of the interface), so the library holds none of NVIDIA's code and
+# needs none of its SDK. It is built only when PHANTASM_NR_VULKAN names a folder holding Khronos's Vulkan headers
+# (vulkan/vulkan.h; Apache-2.0 or MIT), which are not in the repository. nr/PhantasmNR.def names its exports.
+set(PHANTASM_NR_VULKAN "" CACHE PATH "Folder holding Khronos's Vulkan headers (vulkan/vulkan.h), for PhantasmNRInProc.dll")
+if(PHANTASM_NR_VULKAN)
+    add_library(PhantasmNRInProc SHARED nr/PhantasmNR.cpp nr/PhantasmNR.def)
+    target_include_directories(PhantasmNRInProc PRIVATE nr src/core)
+    target_include_directories(PhantasmNRInProc SYSTEM PRIVATE "${PHANTASM_NR_VULKAN}")
+    target_compile_definitions(PhantasmNRInProc PRIVATE NOMINMAX UNICODE _UNICODE)
+    target_link_libraries(PhantasmNRInProc PRIVATE advapi32 wintrust)
+    # The static C runtime, as Phantasm.dll: it asks for no runtime the player may lack.
+    set_property(TARGET PhantasmNRInProc PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    set_property(TARGET PhantasmNRInProc PROPERTY INTERPROCEDURAL_OPTIMIZATION OFF)
+    if(MSVC)
+        target_compile_options(PhantasmNRInProc PRIVATE /W4 /permissive- /utf-8 /Zi /external:anglebrackets /external:W0)
+        target_link_options(PhantasmNRInProc PRIVATE /DEBUG /OPT:REF /OPT:ICF /PDBALTPATH:%_PDB%)
+    endif()
+endif()
 
 # The development probe: a second SKSE plugin that is a Phantasm client through the public header only, with its own
 # Magelight page (testclient/). Never shipped.

@@ -143,6 +143,19 @@ namespace Phantasm::Tests
             Check(SceneCastHint("14|x;AAF99|y", 0x14).size() == 1 && SceneCastHint("14|x;AAF99|y", 0x14)[0].actor == 0xAAF99,
                   "scene: the view's own actor is left out");
             Check(SceneCastHint("AAF99|a;aaf99|b", 0x14).size() == 1, "scene: a repeat is left out");
+            Check(cast[0].scale == 1.0f && cast[1].scale == 1.0f, "scene: an entry with no scale is drawn at its own size");
+            const auto sized = SceneCastHint("AAF99|a|1,2,3,4| 0.95 ;BBF99|b||1.08;CCF99|c|1,2,3,4|big", 0x14);
+            Check(sized.size() == 3 && sized[0].scale == 0.95f && sized[0].r == 4.0f, "scene: a scale after the offset");
+            Check(sized[1].scale == 1.08f && sized[1].x == 0.0f, "scene: a scale with the offset left empty");
+            Check(sized[2].scale == 1.0f && sized[2].x == 1.0f, "scene: a scale that is no number leaves the size alone");
+
+            Check(FigureScaleHint("") == 1.0f && FigureScaleHint(" 1.05 ") == 1.05f && FigureScaleHint("0.9") == 0.9f,
+                  "scale: a number is the multiple, none is 1");
+            Check(FigureScaleHint("0") == 1.0f && FigureScaleHint("-2") == 1.0f && FigureScaleHint("nan") == 1.0f &&
+                      FigureScaleHint("inf") == 1.0f && FigureScaleHint("1.0x") == 1.0f && FigureScaleHint("tall") == 1.0f,
+                  "scale: zero, a negative, a non-number or one that is not finite is 1");
+            Check(FigureScaleHint("0.1") == kMinFigureScale && FigureScaleHint("12") == kMaxFigureScale,
+                  "scale: held between a half and twice the size");
             Check(SceneCastHint("0|a;zz|b;123456789|c", 0x14).empty(), "scene: no FormID, a non-hex one or one too long");
             Check(SceneCastHint("1|a;2|b;3|c;4|d;5|e", 0x14).size() == kMaxSceneCast, "scene: at most kMaxSceneCast others");
             const auto offsets = SceneCastHint("AAF99|a|1,2,3;BBB|b|1,2,x,4;CCC|c|1,2,3,nan", 0x14);

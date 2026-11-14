@@ -1,0 +1,10 @@
+; PhantasmNRInProc.dll's exports: PhantasmNR.h's functions, for Phantasm.dll (src/NeuralInProc.cpp).
+LIBRARY PhantasmNRInProc
+EXPORTS
+    PhantasmNR_Start
+    PhantasmNR_Process
+    PhantasmNR_Trim
+    PhantasmNR_LiveAttach
+    PhantasmNR_LiveEvaluate
+    PhantasmNR_LiveDetach
+    PhantasmNR_Shutdown

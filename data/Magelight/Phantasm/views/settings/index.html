@@ -1,0 +1,1101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Phantasm settings</title>
+<style>
+/* Phantasm's settings page on Magelight UI (native/src/SettingsPage.h has the protocol). One file: nothing is loaded
+   from anywhere else. Written for Ultralight's WebKit, so no gap on flex containers, inset, :has(), container
+   queries, aspect-ratio or <select>. A rounded box keeps one border on all four sides: the engine draws a rounded
+   box whose sides differ as wedges. Every colour is a variable on :root, but those of Phantasm's mark, which are its
+   own. */
+:root {
+  --backdrop: rgba(6, 7, 9, 0.74);
+  --surface: #16181d;
+  --surface-2: #1c1f25;
+  --well: #111317;
+  --line: #262a31;
+  --line-2: #333842;
+  --ink: #eceae6;
+  --ink-mid: #a9adb6;
+  --ink-low: #878c96;
+  --accent: #a78bfa;
+  --accent-ink: #120d22;
+  --focus: rgba(167, 139, 250, 0.45);
+  --shadow: rgba(0, 0, 0, 0.6);
+  --dot-off: #6f747e;
+  --dot-wait: #e3b04b;
+  --dot-run: #6fd39a;
+  --dot-fail: #f08a8a;
+  --warn-ground: #2a2415;
+  --warn-line: #54451c;
+  --warn-ink: #efd48b;
+  --note-ground: #1a2028;
+  --note-line: #2c3848;
+  --note-ink: #b9c9dd;
+  --bad-ground: #2a1d1d;
+  --bad-line: #4a2c2c;
+  --bad-ink: #f3c6c6;
+  --mark-glow: rgba(95, 243, 232, 0.4);
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+}
+body {
+  overflow: hidden;
+  color: var(--ink);
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  -webkit-user-select: none;
+  user-select: none;
+}
+button {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+}
+button:focus {
+  outline: none;
+}
+
+.backdrop {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--backdrop);
+}
+.card {
+  width: 760px;
+  max-width: calc(100vw - 48px);
+  max-height: calc(100vh - 48px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid var(--line-2);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 0 24px 60px var(--shadow);
+}
+.card::-webkit-scrollbar {
+  width: 10px;
+}
+.card::-webkit-scrollbar-track {
+  background: transparent;
+}
+.card::-webkit-scrollbar-thumb {
+  border-radius: 5px;
+  background: var(--line-2);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  padding: 16px 24px 14px;
+}
+.mark {
+  flex: none;
+  width: 35px;
+  height: 42px;
+  margin-right: 12px;
+  -webkit-filter: drop-shadow(0 0 5px var(--mark-glow));
+  filter: drop-shadow(0 0 5px var(--mark-glow));
+}
+.head-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.title {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.version {
+  margin-left: 10px;
+  color: var(--ink-low);
+  font-size: 14px;
+}
+/* The page's own key, and the button that changes it */
+.head-key {
+  display: flex;
+  flex: none;
+  align-items: center;
+  color: var(--ink-low);
+  font-size: 13px;
+}
+.keycap {
+  display: inline-block;
+  min-width: 36px;
+  height: 34px;
+  margin-left: 10px;
+  padding: 0 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  background: var(--well);
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 32px;
+  text-align: center;
+  white-space: nowrap;
+}
+.keycap.is-catching {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.block {
+  padding: 14px 24px 12px;
+  border-top: 1px solid var(--line);
+}
+.block-title {
+  margin-bottom: 6px;
+  color: var(--ink-low);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+/* Until the first state arrives there is nothing true to show in a control. */
+.card.is-waiting .needs-state {
+  opacity: 0.45;
+  pointer-events: none;
+}
+.fine {
+  margin: 0 0 6px;
+  color: var(--ink-low);
+  font-size: 13px;
+}
+.fine.is-path {
+  margin-top: 8px;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+/* Status */
+.state {
+  display: flex;
+  align-items: flex-start;
+  padding: 3px 0;
+}
+.dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  margin: 6px 10px 0 2px;
+  border-radius: 50%;
+  background: var(--dot-off);
+}
+.dot.is-wait {
+  background: var(--dot-wait);
+}
+.dot.is-run {
+  background: var(--dot-run);
+}
+.dot.is-fail {
+  background: var(--dot-fail);
+}
+.state-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.fact {
+  padding: 2px 0 2px 22px;
+  color: var(--ink-mid);
+  font-size: 14px;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+.box {
+  margin: 8px 0 2px;
+  padding: 9px 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  font-size: 14px;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+.box.is-warn {
+  border-color: var(--warn-line);
+  background: var(--warn-ground);
+  color: var(--warn-ink);
+}
+.box.is-note {
+  border-color: var(--note-line);
+  background: var(--note-ground);
+  color: var(--note-ink);
+}
+.box.is-bad {
+  border-color: var(--bad-line);
+  background: var(--bad-ground);
+  color: var(--bad-ink);
+}
+
+/* Rows: a label, then its control */
+.row {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+}
+.row.is-switch {
+  cursor: pointer;
+}
+.row-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-right: 16px;
+}
+.row.is-slider .row-label,
+.row.is-text .row-label {
+  flex: 0 0 200px;
+}
+.row-value {
+  flex: 0 0 116px;
+  padding-left: 12px;
+  color: var(--ink-mid);
+  font-size: 14px;
+  text-align: right;
+}
+
+.switch {
+  position: relative;
+  display: block;
+  flex: none;
+  width: 44px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.switch-track {
+  position: absolute;
+  top: 5px;
+  left: 0;
+  width: 44px;
+  height: 22px;
+  border-radius: 11px;
+  background: var(--line-2);
+  transition: background-color 0.15s ease;
+}
+.switch-knob {
+  position: absolute;
+  top: 8px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--ink-mid);
+  transition: left 0.15s ease, background-color 0.15s ease;
+}
+.switch.is-on .switch-track {
+  background: var(--accent);
+}
+.switch.is-on .switch-knob {
+  left: 25px;
+  background: var(--accent-ink);
+}
+.switch:focus .switch-track {
+  box-shadow: 0 0 0 2px var(--focus);
+}
+
+.seg {
+  display: inline-flex;
+  flex: none;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--well);
+}
+.seg-opt {
+  min-width: 84px;
+  height: 32px;
+  margin-left: 2px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-mid);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.seg-opt:first-child {
+  margin-left: 0;
+}
+.seg-opt:hover {
+  color: var(--ink);
+}
+.seg-opt:focus {
+  box-shadow: 0 0 0 2px var(--focus);
+}
+.seg-opt.is-on {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.seg.is-narrow .seg-opt {
+  min-width: 52px;
+}
+
+/* A slider: the track and its filled part are drawn here, and the range input over them shows only its thumb. */
+.slider {
+  position: relative;
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 32px;
+}
+.slider-track {
+  position: absolute;
+  top: 13px;
+  right: 0;
+  left: 0;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--line-2);
+}
+.slider-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 0;
+  background: var(--accent);
+}
+.slider input {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 32px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+.slider input:focus {
+  outline: none;
+}
+.slider input::-webkit-slider-runnable-track {
+  -webkit-appearance: none;
+  height: 32px;
+  border: 0;
+  background: transparent;
+}
+.slider input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-top: 7px;
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+  background: var(--accent);
+}
+.slider input:focus::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px var(--focus);
+}
+
+.text {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  outline: none;
+  background: var(--well);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.text:focus {
+  border-color: var(--accent);
+}
+.text::-webkit-input-placeholder {
+  color: var(--ink-low);
+}
+.btn {
+  flex: none;
+  height: 34px;
+  margin-left: 8px;
+  padding: 0 14px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  background: var(--surface-2);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn:hover {
+  border-color: var(--ink-low);
+}
+.btn:focus {
+  box-shadow: 0 0 0 2px var(--focus);
+}
+
+/* Advanced: its header opens and closes it */
+.block.is-fold {
+  padding-top: 4px;
+}
+.fold {
+  display: block;
+  width: 100%;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-low);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-align: left;
+  cursor: pointer;
+}
+.fold:hover,
+.fold:focus {
+  color: var(--ink);
+}
+.fold-mark {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin: 0 12px 2px 3px;
+  border-right: 2px solid var(--ink-low);
+  border-bottom: 2px solid var(--ink-low);
+  -webkit-transform: rotate(-45deg);
+  transform: rotate(-45deg);
+  transition: transform 0.15s ease;
+}
+.block.is-open .fold-mark {
+  -webkit-transform: rotate(45deg);
+  transform: rotate(45deg);
+}
+.fold-body {
+  display: none;
+  padding-bottom: 4px;
+}
+.block.is-open .fold-body {
+  display: block;
+}
+</style>
+</head>
+<body>
+<div class="backdrop">
+  <div class="card is-waiting" id="card">
+
+    <div class="head">
+      <!-- Phantasm's mark: the arch, the cowled figure and the spark, as the Showcase draws it small. -->
+      <svg class="mark" viewBox="92 38 416 500" aria-hidden="true">
+        <defs>
+          <linearGradient id="mark-frame" x1="0" y1="60" x2="0" y2="526" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#f2fffe"></stop>
+            <stop offset="0.6" stop-color="#8fe9e2"></stop>
+            <stop offset="1" stop-color="#3a9aa0"></stop>
+          </linearGradient>
+          <linearGradient id="mark-cloak" x1="0" y1="124" x2="0" y2="530" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#e9fffc"></stop>
+            <stop offset="0.55" stop-color="#9ff1e9"></stop>
+            <stop offset="1" stop-color="#3fbfb6" stop-opacity="0.3"></stop>
+          </linearGradient>
+          <radialGradient id="mark-mist" cx="300" cy="522" r="210" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#8ff5ec" stop-opacity="0.55"></stop>
+            <stop offset="1" stop-color="#8ff5ec" stop-opacity="0"></stop>
+          </radialGradient>
+        </defs>
+        <path d="M139,522 V240 A161,161 0 0 1 461,240 V522 Z" fill="#0b2230"></path>
+        <path d="M300,124 C338,124 364,152 370,198 C376,244 370,286 382,316 C400,346 432,360 442,396 C450,424 450,470 450,522 L150,522 C150,470 150,424 158,396 C168,360 200,346 218,316 C230,286 224,244 230,198 C236,152 262,124 300,124 Z" fill="url(#mark-cloak)"></path>
+        <path d="M300,168 C330,168 347,194 347,236 C347,284 326,318 300,332 C274,318 253,284 253,236 C253,194 270,168 300,168 Z" fill="#04161d" stroke="#ffffff" stroke-width="7"></path>
+        <ellipse cx="284" cy="252" rx="14" ry="6.5" fill="#e9fffd"></ellipse>
+        <ellipse cx="316" cy="252" rx="14" ry="6.5" fill="#e9fffd"></ellipse>
+        <ellipse cx="300" cy="522" rx="210" ry="30" fill="url(#mark-mist)"></ellipse>
+        <path d="M130,522 V240 A170,170 0 0 1 470,240 V522 M108,526 H212 M388,526 H492" fill="none" stroke="url(#mark-frame)" stroke-width="18" stroke-linecap="round"></path>
+        <path d="M300,44 C302,61 309,68 326,70 C309,72 302,79 300,96 C298,79 291,72 274,70 C291,68 298,61 300,44 Z" fill="#ffffff"></path>
+      </svg>
+      <div class="head-name">
+        <span class="title">Phantasm</span><span class="version" id="version"></span>
+      </div>
+      <div class="head-key needs-state">
+        <span>Opens with</span>
+        <span class="keycap" id="keycap"></span>
+        <button type="button" class="btn" id="keyChange">Change</button>
+      </div>
+    </div>
+
+    <div class="block">
+      <div class="block-title">Status</div>
+      <div class="state">
+        <span class="dot" id="dot"></span>
+        <span class="state-text" id="neuralText">Waiting for Phantasm.</span>
+      </div>
+      <div class="fact" id="libraryLine" style="display: none"></div>
+      <div class="fact" id="followedLine" style="display: none"></div>
+      <div class="box is-warn" id="ownLibraryBox" style="display: none">Neural rendering's own library,
+        PhantasmNRInProc.dll, is not installed in SKSE/Plugins/Phantasm.</div>
+      <div class="box is-note" id="restartBox" style="display: none">Some changes take effect the next time the game
+        starts.</div>
+      <div class="box is-bad" id="saveErrorBox" style="display: none"><span id="saveErrorText"></span> The change still
+        holds for this session.</div>
+      <div class="box is-bad" id="keyErrorBox" style="display: none"></div>
+    </div>
+
+    <div class="block needs-state">
+      <div class="block-title">Neural rendering</div>
+      <p class="fine">Experimental. It needs an nvngx_dlssnr.dll from a neural rendering mod.</p>
+      <div class="row is-switch" data-key="neural">
+        <span class="row-label">Neural rendering</span>
+        <button type="button" class="switch" role="switch" aria-checked="false" aria-label="Neural rendering"><span
+          class="switch-track"></span><span class="switch-knob"></span></button>
+      </div>
+      <div class="row is-switch" data-key="liveViews">
+        <span class="row-label">Also on live views</span>
+        <button type="button" class="switch" role="switch" aria-checked="false" aria-label="Also on live views"><span
+          class="switch-track"></span><span class="switch-knob"></span></button>
+      </div>
+      <div class="row is-slider">
+        <span class="row-label">Working size</span>
+        <span class="slider"><span class="slider-track"><span class="slider-fill"></span></span><input type="range"
+          data-key="liveScale" data-show="percent" min="0.25" max="1" step="0.05" value="0.5"
+          aria-label="Working size"></span>
+        <span class="row-value" id="value-liveScale"></span>
+      </div>
+    </div>
+
+    <div class="block needs-state">
+      <div class="block-title">Live views</div>
+      <div class="row">
+        <span class="row-label">Budget</span>
+        <div class="seg" data-key="budget">
+          <button type="button" class="seg-opt" data-value="smooth">Smooth</button>
+          <button type="button" class="seg-opt" data-value="balanced">Balanced</button>
+          <button type="button" class="seg-opt" data-value="light">Light</button>
+        </div>
+      </div>
+      <div class="row is-slider">
+        <span class="row-label">Budget in milliseconds</span>
+        <span class="slider"><span class="slider-track"><span class="slider-fill"></span></span><input type="range"
+          data-key="budgetMs" data-show="ms" min="0" max="50" step="0.5" value="0"
+          aria-label="Budget in milliseconds"></span>
+        <span class="row-value" id="value-budgetMs"></span>
+      </div>
+    </div>
+
+    <div class="block is-fold needs-state" id="advanced">
+      <button type="button" class="fold" id="advancedToggle" aria-expanded="false"><span
+        class="fold-mark"></span>Advanced</button>
+      <div class="fold-body">
+        <div class="row is-switch" data-key="follow">
+          <span class="row-label">Take my neural rendering mod's settings</span>
+          <button type="button" class="switch" role="switch" aria-checked="false"
+            aria-label="Take my neural rendering mod's settings"><span class="switch-track"></span><span
+            class="switch-knob"></span></button>
+        </div>
+        <p class="fine">While this is on, the style and strengths below stand only for what that mod does not set.</p>
+        <div class="row is-switch" data-key="prestart">
+          <span class="row-label">Start as soon as that mod turns its own on</span>
+          <button type="button" class="switch" role="switch" aria-checked="false"
+            aria-label="Start as soon as that mod turns its own on"><span class="switch-track"></span><span
+            class="switch-knob"></span></button>
+        </div>
+        <div class="row">
+          <span class="row-label">Style</span>
+          <div class="seg is-narrow" data-key="model" data-type="number">
+            <button type="button" class="seg-opt" data-value="0">A</button>
+            <button type="button" class="seg-opt" data-value="1">B</button>
+            <button type="button" class="seg-opt" data-value="2">C</button>
+          </div>
+        </div>
+        <div class="row is-slider">
+          <span class="row-label">Intensity</span>
+          <span class="slider"><span class="slider-track"><span class="slider-fill"></span></span><input type="range"
+            data-key="intensity" data-show="strength" min="0" max="1" step="0.05" value="1"
+            aria-label="Intensity"></span>
+          <span class="row-value" id="value-intensity"></span>
+        </div>
+        <div class="row is-slider">
+          <span class="row-label">Tone</span>
+          <span class="slider"><span class="slider-track"><span class="slider-fill"></span></span><input type="range"
+            data-key="tone" data-show="strength" min="0" max="1" step="0.05" value="1" aria-label="Tone"></span>
+          <span class="row-value" id="value-tone"></span>
+        </div>
+        <div class="row is-slider">
+          <span class="row-label">Structure</span>
+          <span class="slider"><span class="slider-track"><span class="slider-fill"></span></span><input type="range"
+            data-key="structure" data-show="strength" min="0" max="1" step="0.05" value="1"
+            aria-label="Structure"></span>
+          <span class="row-value" id="value-structure"></span>
+        </div>
+        <div class="row is-slider">
+          <span class="row-label">Skin</span>
+          <span class="slider"><span class="slider-track"><span class="slider-fill"></span></span><input type="range"
+            data-key="skin" data-show="strength" min="0" max="1" step="0.05" value="1" aria-label="Skin"></span>
+          <span class="row-value" id="value-skin"></span>
+        </div>
+        <div class="row is-slider">
+          <span class="row-label">Passes</span>
+          <span class="slider"><span class="slider-track"><span class="slider-fill"></span></span><input type="range"
+            data-key="passes" data-show="whole" min="1" max="8" step="1" value="4" aria-label="Passes"></span>
+          <span class="row-value" id="value-passes"></span>
+        </div>
+        <div class="row is-switch" data-key="unsigned">
+          <span class="row-label">Allow unsigned copies</span>
+          <button type="button" class="switch" role="switch" aria-checked="false"
+            aria-label="Allow unsigned copies"><span class="switch-track"></span><span
+            class="switch-knob"></span></button>
+        </div>
+        <div class="row is-text">
+          <span class="row-label">Library</span>
+          <input type="text" class="text" id="folder" spellcheck="false" autocomplete="off"
+            placeholder="auto, a folder or a file; empty for none" aria-label="Library">
+          <button type="button" class="btn" id="folderAuto">auto</button>
+        </div>
+        <p class="fine is-path" id="fileLine" style="display: none"></p>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// Runs as the page loads, not on an event: the host may call phantasmSettingsEvent as soon as the DOM is ready, and
+// a call that finds no such function never reaches this page.
+(function () {
+  'use strict';
+
+  // The DLL's listener: {"op":"get"}, {"op":"set","values":{...}} or {"op":"key","vk":N} (0 as a catch begins), as
+  // JSON text.
+  var LISTENER = 'phantasmSettings';
+  var POLL_MS = 1000;
+  // A value changed here is not taken from an incoming state for this long: a state sent before the change was
+  // handled can still be on its way, and would flip the control back for a moment.
+  var HOLD_MS = 500;
+
+  var values = null;   // the last values heard, with the changes made here laid over them; null before the first
+  var status = {};
+  var hold = {};       // key -> the time until which an incoming value for it is not taken
+  var busy = {};       // key -> true while its slider is held or its field is typed in
+  var uiMode = null;   // true or false once the host has said whether the page holds UI mode
+  var catching = false;   // the next key pressed becomes the page's key
+
+  function byId(id) { return document.getElementById(id); }
+  function own(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
+  function lower(x) { return String(x === undefined || x === null ? '' : x).toLowerCase(); }
+  function each(list, fn) { for (var i = 0; i < list.length; i++) fn(list[i]); }
+  function flag(el, name, on) { if (on) el.classList.add(name); else el.classList.remove(name); }
+  function reveal(el, on) { el.style.display = on ? '' : 'none'; }
+
+  var card = byId('card');
+  var dot = byId('dot');
+  var neuralText = byId('neuralText');
+  var folder = byId('folder');
+  var advanced = byId('advanced');
+  var keycap = byId('keycap');
+  var keyChange = byId('keyChange');
+  var switchRows = document.querySelectorAll('.row.is-switch');
+  var segs = document.querySelectorAll('.seg');
+  var sliders = [];
+
+  // ── DLL to page ──────────────────────────────────────────────────────────────────────────────────────────────
+  // The state, {"values": {...}, "status": {...}}, as JSON text or already parsed.
+  window.phantasmSettingsEvent = function (payload) {
+    var state = payload;
+    if (typeof payload === 'string') {
+      try { state = JSON.parse(payload); } catch (e) { return; }
+    }
+    if (!state || typeof state !== 'object') return;
+    if (state.status && typeof state.status === 'object') status = state.status;
+    if (state.values && typeof state.values === 'object') {
+      var now = Date.now(), next = values || {}, k;
+      for (k in state.values) {
+        if (!own(state.values, k)) continue;
+        if (hold[k] && hold[k] > now) continue;
+        next[k] = state.values[k];
+      }
+      values = next;
+    }
+    draw();
+  };
+
+  // ── Page to DLL ──────────────────────────────────────────────────────────────────────────────────────────────
+  // Magelight's page core, there before any page script runs: magelight.send(listener, text). Without the host at
+  // all this is a plain browser, and a stand-in answers instead; with the host but no core nothing answers, and the
+  // page says so rather than show made-up settings in the game.
+  var core = window.magelight;
+  var reachable = true;
+  var send;
+  if (core && typeof core.send === 'function') {
+    send = function (text) { core.send(LISTENER, text); };
+  } else if (typeof window.__MAGELIGHT__ === 'undefined') {
+    send = standIn();
+  } else {
+    reachable = false;
+    send = function () {};
+  }
+
+  function post(request) {
+    // A throw here is the host going away mid-call: the next poll asks again.
+    try { send(JSON.stringify(request)); } catch (e) {}
+  }
+  function get() { post({ op: 'get' }); }
+  function set(change) {
+    var until = Date.now() + HOLD_MS, k;
+    for (k in change) {
+      if (!own(change, k)) continue;
+      values[k] = change[k];
+      hold[k] = until;
+    }
+    draw();
+    post({ op: 'set', values: change });
+  }
+
+  // ── Drawing ──────────────────────────────────────────────────────────────────────────────────────────────────
+  var DOTS = { off: '', waiting: 'is-wait', starting: 'is-wait', running: 'is-run', failed: 'is-fail' };
+  var SHOW = {
+    percent: function (v) { return Math.round(v * 100) + '%'; },
+    strength: function (v) { return v.toFixed(2); },
+    whole: function (v) { return String(Math.round(v)); },
+    ms: function (v) { return v > 0 ? (Math.round(v * 100) / 100) + ' ms' : "the mode's own"; }
+  };
+
+  function line(el, lead, text) {
+    var t = text === undefined || text === null ? '' : String(text);
+    el.textContent = t ? lead + t : '';
+    reveal(el, t !== '');
+  }
+
+  function drawStatus() {
+    var name = lower(status.neural);
+    var kind = own(DOTS, name) ? DOTS[name] : '';
+    dot.className = kind ? 'dot ' + kind : 'dot';
+    neuralText.textContent = !reachable ? 'This page cannot reach Phantasm.'
+      : values ? String(status.neuralText || '') : 'Waiting for Phantasm.';
+    line(byId('libraryLine'), 'Library: ', status.library);
+    line(byId('followedLine'), 'Settings from: ', status.followed);
+    reveal(byId('ownLibraryBox'), status.ownLibrary === false);
+    reveal(byId('restartBox'), status.restartNeeded === true);
+    byId('saveErrorText').textContent = status.saveError ? 'Not saved: ' + status.saveError : '';
+    reveal(byId('saveErrorBox'), !!status.saveError);
+    line(byId('keyErrorBox'), '', status.keyError);
+    byId('version').textContent = status.version ? String(status.version) : '';
+    line(byId('fileLine'), 'Settings file: ', status.file);
+    drawKey();
+  }
+
+  function drawKey() {
+    flag(keycap, 'is-catching', catching);
+    keycap.textContent = catching ? 'Press a key' : String(status.pageKeyName || '');
+    keyChange.textContent = catching ? 'Cancel' : 'Change';
+  }
+
+  // Whether Library names a source: Phantasm's own rule (NeuralSourceCore::ParseFolder), by which these name none.
+  function sourceNamed(folder) {
+    var f = lower(folder).replace(/^\s+|\s+$/g, '');
+    return f !== '' && f !== 'off' && f !== 'none' && f !== '0';
+  }
+  function neuralOn() { return !!values.enabled && sourceNamed(values.folder); }
+
+  function matches(current, raw, numeric) {
+    return numeric ? Number(current) === Number(raw) : lower(current) === lower(raw);
+  }
+
+  // The filled part ends under the thumb's centre, which travels the track less the thumb's width (18px).
+  function paintSlider(s, v) {
+    var span = s.max - s.min;
+    var p = span > 0 ? (v - s.min) / span : 0;
+    p = p < 0 ? 0 : p > 1 ? 1 : p;
+    s.fill.style.width = 'calc(9px + (100% - 18px) * ' + p.toFixed(4) + ')';
+    s.label.textContent = s.show(v);
+  }
+
+  function drawSlider(s) {
+    if (busy[s.key]) return;
+    var v = Number(values[s.key]);
+    if (v !== v) v = s.min;
+    s.input.value = String(v);
+    paintSlider(s, v);   // the value itself, which a hand-edited file may put between two steps
+  }
+
+  function draw() {
+    drawStatus();
+    if (!values) return;
+    flag(card, 'is-waiting', false);
+    each(switchRows, function (row) {
+      var key = row.getAttribute('data-key');
+      var on = key === 'neural' ? neuralOn() : !!values[key];
+      var button = row.querySelector('.switch');
+      flag(button, 'is-on', on);
+      button.setAttribute('aria-checked', on ? 'true' : 'false');
+    });
+    each(segs, function (seg) {
+      var key = seg.getAttribute('data-key');
+      var numeric = seg.getAttribute('data-type') === 'number';
+      each(seg.querySelectorAll('.seg-opt'), function (opt) {
+        flag(opt, 'is-on', matches(values[key], opt.getAttribute('data-value'), numeric));
+      });
+    });
+    each(sliders, drawSlider);
+    if (!busy.folder) folder.value = values.folder === undefined || values.folder === null ? '' : String(values.folder);
+  }
+
+  // ── Controls ─────────────────────────────────────────────────────────────────────────────────────────────────
+  each(switchRows, function (row) {
+    // The row is the click target; a click on the switch inside it arrives here too.
+    row.addEventListener('click', function () {
+      if (!values) return;
+      var key = row.getAttribute('data-key'), change = {};
+      if (key !== 'neural') {
+        change[key] = !values[key];
+      } else if (neuralOn()) {
+        change.enabled = false;
+      } else {
+        change.enabled = true;
+        if (!sourceNamed(values.folder)) change.folder = 'auto';
+      }
+      set(change);
+    });
+  });
+
+  each(segs, function (seg) {
+    var key = seg.getAttribute('data-key');
+    var numeric = seg.getAttribute('data-type') === 'number';
+    each(seg.querySelectorAll('.seg-opt'), function (opt) {
+      opt.addEventListener('click', function () {
+        if (!values) return;
+        var raw = opt.getAttribute('data-value'), change = {};
+        if (matches(values[key], raw, numeric)) return;
+        change[key] = numeric ? Number(raw) : raw;
+        set(change);
+      });
+    });
+  });
+
+  function sliderNumber(s) {
+    var v = parseFloat(s.input.value);
+    if (v !== v) v = s.min;
+    v = Math.round(v * 100) / 100;
+    // A budget under half a millisecond is no budget: 0, the mode's own.
+    if (s.key === 'budgetMs' && v > 0 && v < 0.5) v = 0;
+    return v;
+  }
+
+  // The slider is let go: what it was moved to is sent, once. One that was only pressed keeps the value it had,
+  // which need not be on one of its steps.
+  function releaseSlider(s) {
+    busy[s.key] = false;
+    if (!values) return;
+    if (s.moved) {
+      s.moved = false;
+      var v = sliderNumber(s), change = {};
+      if (v !== Number(values[s.key])) {
+        change[s.key] = v;
+        set(change);
+        return;
+      }
+    }
+    drawSlider(s);
+  }
+
+  each(document.querySelectorAll('.slider input'), function (input) {
+    var key = input.getAttribute('data-key');
+    var s = {
+      key: key,
+      input: input,
+      min: parseFloat(input.getAttribute('min')),
+      max: parseFloat(input.getAttribute('max')),
+      show: SHOW[input.getAttribute('data-show')],
+      fill: input.parentNode.querySelector('.slider-fill'),
+      label: byId('value-' + key),
+      moved: false
+    };
+    sliders.push(s);
+    function press() { busy[key] = true; }
+    input.addEventListener('mousedown', press);
+    input.addEventListener('touchstart', press);
+    input.addEventListener('input', function () {
+      busy[key] = true;
+      s.moved = true;
+      paintSlider(s, sliderNumber(s));
+    });
+    input.addEventListener('change', function () { releaseSlider(s); });
+    input.addEventListener('blur', function () { releaseSlider(s); });
+  });
+  // A press that moved nothing ends with no change event, and a drag can end off the slider.
+  function releaseAll() { each(sliders, releaseSlider); }
+  document.addEventListener('mouseup', releaseAll, true);
+  document.addEventListener('touchend', releaseAll, true);
+  document.addEventListener('touchcancel', releaseAll, true);
+
+  function commitFolder() {
+    if (!values) return;
+    var typed = folder.value.replace(/^\s+|\s+$/g, '');
+    if (typed !== String(values.folder === undefined || values.folder === null ? '' : values.folder)) {
+      set({ folder: typed });
+    }
+  }
+  folder.addEventListener('focus', function () { busy.folder = true; });
+  folder.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.keyCode === 13) commitFolder();
+  });
+  folder.addEventListener('blur', function () {
+    commitFolder();
+    busy.folder = false;
+    if (values) draw();
+  });
+  byId('folderAuto').addEventListener('click', function () {
+    if (!values) return;
+    folder.value = 'auto';
+    if (values.folder !== 'auto') set({ folder: 'auto' });
+  });
+
+  // The page's own key. After Change, the next key pressed is sent as its Windows virtual-key code, which is what the
+  // host hands a page as keyCode; the DLL turns it into the key and refuses one that cannot open a page. Escape,
+  // which closes the page, keeps the key it has.
+  keyChange.addEventListener('click', function () {
+    if (!values) return;
+    catching = !catching;
+    keyChange.blur();   // Space or Enter is then a key to catch, not a second press of this button
+    drawKey();
+    if (catching) post({ op: 'key', vk: 0 });   // what the last key was refused for no longer stands
+  });
+  // A click anywhere else ends the catch: the next key is then meant for whatever was clicked.
+  document.addEventListener('mousedown', function (e) {
+    if (catching && e.target !== keyChange) stopCatching();
+  }, true);
+  document.addEventListener('keydown', function (e) {
+    if (!catching) return;
+    e.preventDefault();
+    e.stopPropagation();
+    var vk = e.keyCode || e.which || 0;
+    // Shift, Ctrl, Alt or a Windows key alone: the key itself is still to come.
+    if (vk === 16 || vk === 17 || vk === 18 || vk === 91 || vk === 92) return;
+    catching = false;
+    drawKey();
+    if (vk && vk !== 27) post({ op: 'key', vk: vk });
+  }, true);
+  function stopCatching() {
+    if (!catching) return;
+    catching = false;
+    drawKey();
+  }
+
+  byId('advancedToggle').addEventListener('click', function () {
+    var open = !advanced.classList.contains('is-open');
+    flag(advanced, 'is-open', open);
+    this.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+
+  // ── Asking ───────────────────────────────────────────────────────────────────────────────────────────────────
+  // On load, when the page takes UI mode (its key opened it), and every second while it shows.
+  function shown() { return !document.hidden && uiMode !== false; }
+  if (core && typeof core.on === 'function') {
+    core.on('__uimode', function (on) {
+      uiMode = on === '1';
+      if (uiMode) get(); else stopCatching();
+    });
+  }
+  document.addEventListener('visibilitychange', function () { if (shown()) get(); else stopCatching(); });
+  setInterval(function () { if (shown()) get(); }, POLL_MS);
+  draw();
+  get();
+
+  // ── A plain browser ──────────────────────────────────────────────────────────────────────────────────────────
+  // The DLL's part, made up: it keeps values and a status in memory and answers get and set as the DLL does.
+  // Turning neural rendering on reads "starting", then "running" a second later.
+  function standIn() {
+    var v = {
+      budget: 'smooth', budgetMs: 0, enabled: false, folder: 'auto', unsigned: true, follow: true, model: 1,
+      intensity: 1, tone: 1, structure: 1, skin: 1, passes: 4, liveViews: true, liveScale: 0.5, prestart: true,
+      pageKey: 70
+    };
+    var s = {
+      neural: 'off', neuralText: 'Neural rendering is off.', library: '', followed: '', ownLibrary: true,
+      restartNeeded: false, saveError: '', pageReady: true, pageKeyName: 'Scroll Lock', keyError: '', version: '0.0.0-preview',
+      file: 'C:\\Games\\Skyrim Special Edition\\Data\\SKSE\\Plugins\\Phantasm.ini'
+    };
+    var timer = 0;
+
+    function answer() {
+      var text = JSON.stringify({ values: v, status: s });
+      setTimeout(function () { window.phantasmSettingsEvent(text); }, 0);
+    }
+    function settle() {
+      clearTimeout(timer);
+      if (!(v.enabled && v.folder !== '')) {
+        s.neural = 'off';
+        s.neuralText = s.library ? 'Neural rendering is off. It stays loaded until the game closes.'
+          : 'Neural rendering is off.';
+        return;
+      }
+      if (s.library) {
+        s.neural = 'running';
+        s.neuralText = 'Neural rendering is running.';
+        return;
+      }
+      s.neural = 'starting';
+      s.neuralText = 'Neural rendering is starting.';
+      timer = setTimeout(function () {
+        s.neural = 'running';
+        s.neuralText = 'Neural rendering is running.';
+        s.library = 'C:\\Games\\Skyrim Special Edition\\Data\\SKSE\\Plugins\\TheosRenderPipeline\\' +
+          'nvngx_dlssnr_int8.dll';
+        s.followed = v.follow ? "Theo's Render Pipeline" : '';
+        answer();
+      }, 1000);
+    }
+
+    return function (text) {
+      var request, k, before;
+      try { request = JSON.parse(text); } catch (e) { return; }
+      if (!request) return;
+      var op = lower(request.op);
+      if (op === 'set' && request.values && typeof request.values === 'object') {
+        before = { folder: v.folder, unsigned: v.unsigned };
+        for (k in request.values) {
+          if (own(request.values, k) && own(v, k)) v[k] = request.values[k];
+        }
+        v.budgetMs = v.budgetMs > 0 ? Math.min(50, Math.max(0.5, v.budgetMs)) : 0;
+        v.folder = String(v.folder).replace(/^\s+|\s+$/g, '');
+        if (s.library && (v.folder !== before.folder || v.unsigned !== before.unsigned)) s.restartNeeded = true;
+        settle();
+      } else if (op === 'key') {
+        // Virtual-key codes: 13 Enter, 112 to 123 F1 to F12.
+        var vk = Number(request.vk) || 0;
+        var named = { 145: 'Scroll Lock', 19: 'Pause', 45: 'Insert', 46: 'Delete', 36: 'Home', 35: 'End' };
+        if (vk === 0) {
+          s.keyError = '';
+        } else if (vk === 13) {
+          s.keyError = 'That key cannot open the page.';
+        } else {
+          v.pageKey = vk;
+          s.pageKeyName = vk >= 112 && vk <= 123 ? 'F' + (vk - 111) : named[vk] || String.fromCharCode(vk);
+          s.keyError = '';
+        }
+      } else if (op !== 'get') {
+        return;
+      }
+      answer();
+    };
+  }
+})();
+</script>
+</body>
+</html>

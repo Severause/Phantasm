@@ -12,6 +12,7 @@
 #include "PresentHandoff.h"
 #include "MutationLane.h"   // the player's world settle, from the follow-up recollect
 #include "MagelightUI_API.h"   // Magelight texture-image mirror (ImageSource)
+#include "NeuralLive.h"
 #include "ActorCollectCore.h"
 #include "AsciiText.h"
 #include "CastingArtCore.h"
@@ -34,6 +35,7 @@
 #include "ParticleSimCore.h"
 #include "ControllerKeysCore.h"
 #include "RendererFxCore.h"
+#include "FaceAimCore.h"
 #include "FaceMorphCore.h"
 #include "FreezeCore.h"
 #include "ViewRegistryCore.h"
@@ -307,8 +309,9 @@ cbuffer cbPerObject : register(b0)
     //        Under palette alpha (pbrParams.w) the palette row it is read at.
     //   .y = back-light map bound at t7 (non-skin pieces whose shader
     //        back-lights; t7 is the FaceGen detail map on heads).
-    //   .z = a hair-shader (kHairTint) piece, strand or opaque: the hair
-    //        colour rule in the PS (strandColour).
+    //   .z = a hair-shader (kHairTint) piece, strand or opaque (above 0.5):
+    //        the hair colour rule in the PS (strandColour); 2 a strand whose
+    //        back faces are lit reversed (RendererMaterialCore::HairLaneCode).
     //   .w = the VS's depth pull toward the camera in game units of view
     //        depth (RendererMaterialCore::SkinDepthPull), 0 = none.
     float4   materialParams;
@@ -578,7 +581,7 @@ float EffectFade(VS_OUT input)
     return fade;
 }
 
-float4 PS_Main(VS_OUT input) : SV_Target
+float4 PS_Main(VS_OUT input, bool isFrontFace : SV_IsFrontFace) : SV_Target
 {
     // Overlays, blend pieces and a blended eye's blend draw (pieceFlags.w)
     // emit the sampled diffuse alpha so they composite; everything else emits 1.0 (opaque, overdrawing
@@ -755,6 +758,16 @@ float4 PS_Main(VS_OUT input) : SV_Target
     //   4. Vertex normal (Lambertian path, no normal map): per-vertex
     //      normal from the input stream. Smooth-shaded.
     float3 nWorld;
+    // A one-sided strand's back face is lit as the front face the game would
+    // show there (RendererMaterialCore::ShadesNormalReversed): its vertex
+    // normal reversed where it points to the far side of its own triangle.
+    // faceToCam is the triangle's normal on the camera's side, whatever its
+    // winding: the view direction would misread a bent vertex normal near
+    // the silhouette.
+    const float3 faceRaw   = cross(ddy(input.posWorld.xyz), ddx(input.posWorld.xyz));
+    const float3 faceToCam = dot(faceRaw, cameraPosWorld.xyz - input.posWorld.xyz) < 0.0 ? -faceRaw : faceRaw;
+    const float  backFlip  =
+        (materialParams.z > 1.5 && !isFrontFace && dot(input.normalWorld, faceToCam) < 0.0) ? -1.0 : 1.0;
     bool   useDerivedNormal = (tintParams.w > 1.5);
     bool   useModelSpaceNM  = useDerivedNormal && (colorMode.y > 0.5);
     bool   useTangentNM     = !useDerivedNormal && (colorMode.y > 0.5);
@@ -779,7 +792,7 @@ float4 PS_Main(VS_OUT input) : SV_Target
         // The interpolated world frame from the VS, renormalised (a
         // zero-length axis, a mesh without tangents, contributes nothing):
         // red along T, green along B, blue along N, as the engine does.
-        float3 N = normalize(input.normalWorld);
+        float3 N = normalize(input.normalWorld) * backFlip;
         float3 T = input.tangentWorld   * rsqrt(max(dot(input.tangentWorld,   input.tangentWorld),   1e-12));
         float3 B = input.bitangentWorld * rsqrt(max(dot(input.bitangentWorld, input.bitangentWorld), 1e-12));
         float4 nmSample = normalMapTex.Sample(diffuseSamp, input.uv);
@@ -790,7 +803,7 @@ float4 PS_Main(VS_OUT input) : SV_Target
         // skin keeps its material-driven spec.
         glossMask = lerp(1.0, nmSample.a, miscParams.z);
     } else {
-        nWorld = input.normalWorld;
+        nWorld = input.normalWorld * backFlip;
     }
 
     float  nLen  = length(nWorld);
@@ -2833,6 +2846,30 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
     static thread_local bool s_skipHiddenGeom             = false;
     // The root of the actor collect in progress (null outside one).
     static thread_local const RE::NiAVObject* s_collectRoot = nullptr;
+
+    // The worlds one pass over an actor's 3D takes from the nodes' chains instead of the game's (PosedWorld): another
+    // mod left them shrunk (ActorCollectCore::TakesChain). Keyed by the address of the node's world, which a skin's
+    // bone world table holds too. A pass is an actor collect, a follow tick or a clip rig's build: each begins its
+    // own (BeginPosedPass), and the map is filled at the pass's first small world, so an actor with none costs
+    // nothing. Never a scope object (a fault in RunGuarded skips destructors), so root may be left set after a
+    // fault: nothing reads it before the next pass begins.
+    struct PosedPass
+    {
+        RE::NiAVObject* root  = nullptr;   // null outside a pass: every world is the game's
+        RE::FormID      fid   = 0;         // for the log; 0 when the pass does not know
+        bool            built = false;
+        std::unordered_map<const RE::NiTransform*, XMFLOAT4X4> taken;
+    };
+    static thread_local PosedPass t_posedPass;
+    static void EndPosedPass()
+    {
+        t_posedPass.root  = nullptr;
+        t_posedPass.built = false;
+        t_posedPass.taken.clear();
+    }
+    static void     BeginPosedPass(RE::NiAVObject* root, RE::FormID fid);
+    static XMMATRIX PosedWorldAt(const RE::NiTransform* at, const RE::NiTransform& world);
+    static XMMATRIX PosedWorld(const RE::NiAVObject* node);
     // The engine's runtime attachments on the actor collected (spell art, effect-shader addon shells), found before
     // the walk (FindRuntimeAttachments). The walk leaves out their subtrees and those of the attachment nodes
     // (ActorCollectCore::AttachmentOf), and lists what it left out for the collect's log line.
@@ -2935,6 +2972,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         s_wornArmorRoots.clear();
         s_skipHiddenGeom             = false;
         s_collectRoot                = nullptr;
+        EndPosedPass();
         s_runtimeAttachRoots.clear();
         s_runtimeAttachLeftOut.clear();
         s_castingArts.clear();
@@ -6716,9 +6754,9 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         e.ibHold = e.ib;
         e.vertexStride = desc.GetSize();
         e.triangleCount = triCount;
-        e.worldMatrix = NiTransformToXM(geom->world);
         // As captured, a rigid piece stays at its live node, with the skinned
-        // body around it.
+        // body around it (PosedWorld: a weapon on a node another mod left shrunk).
+        e.worldMatrix = actor && s_capturedPose ? PosedWorld(geom) : NiTransformToXM(geom->world);
         if (actor && !s_capturedPose) RigidBindReparent(geom, actor, e.worldMatrix);
         if (actor && s_capturedPose) e.liveAnchor = RE::NiPointer<RE::NiAVObject>(geom);
         e.sortCentre = DrawnBoundCentre(geom, e.worldMatrix);
@@ -6822,6 +6860,98 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         return out.empty() ? std::string("?") : out;
     }
 
+    // ── Worlds another mod left shrunk (t_posedPass) ──
+    // Starts a pass over the actor 3D under root: until the next begins, PosedWorld answers for the nodes below it.
+    static void BeginPosedPass(RE::NiAVObject* root, RE::FormID fid)
+    {
+        EndPosedPass();
+        t_posedPass.root = root;
+        t_posedPass.fid  = fid;
+    }
+
+    // BuildClipRig's cap: the nodes one pass looks at.
+    constexpr std::size_t kPosedPassMaxNodes = 8192;
+
+    // Fills the pass's map: every node below the root, parents first, that ActorCollectCore::TakesChain gives its
+    // chain, with its local on the world its parent was given. Reads the 3D in place, so it runs inside the pass's
+    // crash net; a fault leaves the map as far as it got.
+    static void BuildPosedPass()
+    {
+        auto& pass = t_posedPass;
+        pass.built = true;
+        struct Item
+        {
+            RE::NiAVObject* obj;
+            XMFLOAT4X4      parentPosed;   // the world the parent was given
+            float           parentScale;   // the parent's own world scale
+            bool            parentTook;
+        };
+        std::vector<Item> stack;
+        const auto pushChildren = [&stack](RE::NiAVObject* obj, const XMMATRIX& posed, float scale, bool took) {
+            auto* node = obj->AsNode();
+            if (!node) return;
+            XMFLOAT4X4 p;
+            XMStoreFloat4x4(&p, posed);
+            for (auto& c : node->GetChildren()) {
+                if (c) stack.push_back({ c.get(), p, scale, took });
+            }
+        };
+        pushChildren(pass.root, NiTransformToXM(pass.root->world), pass.root->world.scale, false);
+        RE::NiAVObject* tops[4]{};   // the first few nodes shrunk under a parent that was not
+        int             topCount = 0;
+        for (std::size_t seen = 0; !stack.empty() && seen < kPosedPassMaxNodes; ++seen) {
+            const Item it = stack.back();
+            stack.pop_back();
+            const RE::NiTransform& world = it.obj->world;
+            bool     took  = ActorCollectCore::TakesChain(it.parentTook, world.scale, it.parentScale, it.obj->local.scale);
+            XMMATRIX posed = NiTransformToXM(world);
+            if (took) {
+                const XMMATRIX chain = XMMatrixMultiply(NiTransformToXM(it.obj->local), XMLoadFloat4x4(&it.parentPosed));
+                took = MatrixIsFinite(chain);
+                if (took) {
+                    posed = chain;
+                    XMStoreFloat4x4(&pass.taken[&it.obj->world], chain);
+                    if (!it.parentTook && topCount++ < 4) tops[topCount - 1] = it.obj;
+                }
+            }
+            pushChildren(it.obj, posed, world.scale, took);
+        }
+        if (pass.taken.empty()) return;
+        // Once per actor and count of nodes a session, decided before any text is built: a follow tick fills the
+        // map every frame.
+        static std::mutex                        s_m;
+        static std::unordered_set<std::uint64_t> s_told;
+        const std::uint64_t key = (static_cast<std::uint64_t>(pass.fid) << 32) ^
+                                  (static_cast<std::uint64_t>(topCount) << 16) ^ pass.taken.size();
+        bool                tell = false;
+        {
+            std::lock_guard g(s_m);
+            tell = s_told.size() < 256 && s_told.insert(key).second;
+        }
+        if (!tell) return;
+        std::string names;
+        for (int i = 0; i < topCount && i < 4; ++i) names += fmt::format("{}'{}'", i ? ", " : "", SafeNodeName(tops[i]));
+        SKSE::log::info("MannequinRenderer: {:08X} - another mod left {} node(s) shrunk while their own scales say they "
+                        "show ({}{}; a first-person body mod hides the player's head this way): {} node(s) are posed "
+                        "from their own transforms instead",
+                        pass.fid, topCount, names, topCount > 4 ? ", ..." : "", pass.taken.size());
+    }
+
+    // The world the view poses a node with: the game's, unless the pass found it left shrunk (BuildPosedPass). at is
+    // the address the world was read from (a node's world, or a skin's bone world table entry, which is one); world
+    // is what was read there. Outside a pass, and for a world that is not small, it is the game's.
+    static XMMATRIX PosedWorldAt(const RE::NiTransform* at, const RE::NiTransform& world)
+    {
+        auto& pass = t_posedPass;
+        if (pass.root && ActorCollectCore::SmallWorld(world.scale)) {
+            if (!pass.built) BuildPosedPass();
+            if (const auto it = pass.taken.find(at); it != pass.taken.end()) return XMLoadFloat4x4(&it->second);
+        }
+        return NiTransformToXM(world);
+    }
+
+    static XMMATRIX PosedWorld(const RE::NiAVObject* node) { return PosedWorldAt(&node->world, node->world); }
+
     // FillCapturedPalette for a skin the engine has not bound (numMatrices 0): the engine fills a palette only when it
     // draws the shape, so an actor it has not drawn yet (hidden, or placed while the game is paused) has none. Its bone
     // list is already linked, one entry per skin-data bone (ActorCollectCore::SelfBindsUnbound), and each bone's world
@@ -6857,7 +6987,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
                 refuse("unreadable world");
                 break;
             }
-            const XMMATRIX m = XMMatrixMultiply(NiTransformToXM(ShippedSkinToBone(sd, i)), NiTransformToXM(world));
+            const XMMATRIX m = XMMatrixMultiply(NiTransformToXM(ShippedSkinToBone(sd, i)), PosedWorldAt(&bone->world, world));
             if (!MatrixIsFinite(m)) {
                 refuse("not finite");
                 break;
@@ -6881,7 +7011,8 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
     // Fills out with the palette a skin draws with as captured: per skin bone
     // i, skinToBone_i x the bone's current world, the engine's own pair (its
     // boneWorldTransforms entry, else the bone node's world, else the skin's
-    // root parent), transposed for the HLSL. The packed vertex indices address
+    // root parent; a world another mod left shrunk is posed again, PosedWorldAt),
+    // transposed for the HLSL. The packed vertex indices address
     // this whole list, never a partition's own. Returns why the
     // skin cannot be read or posed, or null when out holds the palette (out is
     // then resized to the skin's bones; on a refusal its contents are partial).
@@ -6904,6 +7035,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
                 SafeReadBytes(&table, si->boneWorldTransforms + i, sizeof(table)) && table) {
                 have = SafeReadBytes(&world, table, sizeof(world));
             }
+            const RE::NiTransform* at = table;   // where world was read from
             if (!have) {
                 // Without a bones[] array a bone the table misses has no
                 // place: the skin root would collapse it there unseen.
@@ -6913,8 +7045,9 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
                 RE::NiAVObject* src = bone ? bone : si->rootParent;
                 if (!src) return "a bone with no transform";
                 world = src->world;
+                at    = &src->world;
             }
-            const XMMATRIX m = XMMatrixMultiply(NiTransformToXM(ShippedSkinToBone(sd, i)), NiTransformToXM(world));
+            const XMMATRIX m = XMMatrixMultiply(NiTransformToXM(ShippedSkinToBone(sd, i)), PosedWorldAt(at, world));
             if (!MatrixIsFinite(m)) return "a non-finite bone matrix";
             XMStoreFloat4x4(&out[i], XMMatrixTranspose(m));
         }
@@ -7205,19 +7338,19 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             // placement the rest palette replaces. A skinned weapon (a bow)
             // is drawn rigid in the classic doll (its bones are its own, not
             // the skeleton's), so it moves onto its bone like any rigid weapon.
-            worldMat   = NiTransformToXM(geom->world);
+            worldMat   = s_capturedPose ? PosedWorld(geom) : NiTransformToXM(geom->world);
             liveAnchor = geom;
             if (rideHead) {
                 // Its rest placement is in the bind frame the collect's head re-parent took (s_headBind, the
-                // actor's skins share it): inverse(R) = inverse(bind head) x live head moves it onto the live head,
-                // where it rides.
-                XMVECTOR       d;
-                const XMMATRIX liveHead    = NiTransformToXM(s_headBoneNode->world);
-                const XMMATRIX liveHeadInv = XMMatrixInverse(&d, liveHead);
-                worldMat       = XMMatrixMultiply(worldMat, XMMatrixInverse(&d, s_headReparent));
-                anchorLocal    = XMMatrixMultiply(worldMat, liveHeadInv);
+                // actor's skins share it), so its place on the head is that placement x inverse(bind head): the
+                // live head cancels out of inverse(R) x inverse(live head), and is never divided by. It rides the
+                // head as the view poses it; with no usable place it is moved onto the live head once and stays.
+                XMVECTOR d;
+                anchorLocal    = XMMatrixMultiply(worldMat, XMMatrixInverse(&d, s_headBind));
                 hasAnchorLocal = MatrixIsFinite(anchorLocal);
                 liveAnchor     = hasAnchorLocal ? s_headBoneNode : geom;
+                worldMat       = hasAnchorLocal ? XMMatrixMultiply(anchorLocal, PosedWorld(s_headBoneNode))
+                                                : XMMatrixMultiply(worldMat, XMMatrixInverse(&d, s_headReparent));
                 const char* gn = (geom->name.c_str() && geom->name.c_str()[0]) ? geom->name.c_str() : "<no-name>";
                 static std::unordered_set<std::string> s_loggedRide;
                 if (s_loggedRide.insert(fmt::format("{:08X}|{}", actor->GetFormID(), gn)).second) {
@@ -7240,14 +7373,14 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             const auto  place = ActorCollectCore::PlaceOf(dynFacts);
             if (place == ActorCollectCore::DynShapePlace::kLiveHeadBone) {
                 RE::NiAVObject* liveHead = s_liveHeadNode;
-                worldMat   = NiTransformToXM(liveHead->world);
+                worldMat   = PosedWorld(liveHead);
                 liveAnchor = liveHead;
                 path = "live head bone (captured, not skinned)";
             } else if (place == ActorCollectCore::DynShapePlace::kHeadBoneAnchor) {
                 worldMat = *headBoneWorld;
                 path = "head-bone-anchor";
             } else {
-                worldMat   = NiTransformToXM(geom->world);
+                worldMat   = s_capturedPose ? PosedWorld(geom) : NiTransformToXM(geom->world);
                 liveAnchor = s_capturedPose ? geom : nullptr;   // classic re-hangs the face below
 
                 // Put the FaceGen face on the head the body is drawn with (the
@@ -7740,6 +7873,30 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
                 }
             }
         };
+        // The skeleton's own head first, under its shallowest "NPC Root [Root]": a worn piece hung on the root (a wig's
+        // physics tree) can carry a node of the head's name, and a walk of the whole tree could meet that one first.
+        static thread_local std::vector<RE::NiAVObject*> level, next;
+        level.assign(1, root);
+        for (int depth = 0; depth < 8 && !level.empty(); ++depth) {
+            next.clear();
+            for (auto* n : level) {
+                const char* nm = n->name.c_str();
+                if (nm && _stricmp(nm, "NPC Root [Root]") == 0) {
+                    Walker skeleton;
+                    skeleton.Visit(n);
+                    if (skeleton.found) return skeleton.found;
+                    level.clear();
+                    next.clear();
+                    break;
+                }
+                if (auto* node = n->AsNode()) {
+                    for (auto& c : node->GetChildren()) {
+                        if (c) next.push_back(c.get());
+                    }
+                }
+            }
+            level.swap(next);
+        }
         Walker w;
         w.Visit(root);
         return w.found;
@@ -7802,6 +7959,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
     constexpr float kActorChestHeight = 75.0f;   // figure midpoint, biased slightly toward head
     constexpr float kActorCamDistance = 280.0f;  // ~39u headroom over the head bone
     constexpr float kActorFovDeg      = 35.0f;   // narrower FOV = less perspective skew
+    static_assert(kActorFovDeg == StillShotCore::kHeadShotFovDeg, "a head shot's zoom is framed for the actor view's FOV");
 
     // ── Per-piece constant-buffer fill ──
     // Which live view a piece is drawn for. They share one material cascade;
@@ -8045,12 +8203,15 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         // x = the emitted-alpha multiplier (read only under pieceFlags.w), or
         // the palette alpha's row (pbrParams.w);
         // y = the back-light map at t7, which a head's detail map would own;
-        // z = the hair colour rule; w = the decal depth pull (VS_Main).
+        // z = the hair lane (HairLaneCode: the hair colour rule, and a
+        // one-sided strand's back faces lit reversed; a piece drawn from both
+        // sides for its node or transform counts as two-sided, as for culling);
+        // w = the decal depth pull (VS_Main).
         p.materialParams = XMFLOAT4(
             (g.isOverlay || g.isSkinDecal || g.isAlphaBlend || g.eyeBlend) ? RMC::EmitAlphaMultiplier(g.materialAlpha)
                                                                            : 1.0f,
             (g.backLightSRV && !g.detailSRV) ? 1.0f : 0.0f,
-            g.isHairMaterial ? 1.0f : 0.0f,
+            RMC::HairLaneCode(g.isHairMaterial, g.twoSided || g.cullExempt, strand),
             g.depthPull);
     }
 
@@ -11001,6 +11162,17 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
     }
     static LiveTargets& LT() { return CurLiveImage().targets; }
 
+    // The head bone as a view draws it, for an aim at the face (FaceAimCore): its world (row-vector, NiTransformToXM's)
+    // and its rest transform relative to the actor's root (the race skeleton NIF's, SkeletonNif::headFromRoot), which
+    // tells which way that skeleton's head bone faces.
+    struct DrawnHead
+    {
+        XMFLOAT4X4 world{};
+        bool       have = false;
+        XMFLOAT4X4 restFromRoot{};
+        bool       haveRest = false;
+    };
+
     // Each NPC's last complete look this session (LastCaptureCore), one per pose and weapons choice it was drawn in
     // (LookKey): the actor view's stand-in while they cannot be captured live. The entries hold their own references
     // (GeometryEntry), and a kept copy drops the live bone and anchor nodes, so a look outlives the NPC's 3D without
@@ -11011,6 +11183,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         XMFLOAT3                   centre{}, collectPos{};
         float                      facingYawDeg = 0.0f;   // the orbit yaw facing the look's front, as it was posed
         float                      frameScale   = 1.0f;   // the figure scale it was framed at (ActorLiveState)
+        DrawnHead                  head;                  // its head as drawn (ActorLiveState::head)
         // The textures and buffers it pins, by their D3D resource, for LastCaptureCore's memory budget.
         LastCaptureCore::Resources<std::uintptr_t> resources;
     };
@@ -11053,8 +11226,8 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
     };
     static auto& s_actorImageRegs = NeverDestroyed<std::unordered_map<std::string, ActorImageReg>>();
 
-    // An actor view's display hints (Host's ApplyHints; the API's "pose", "motion", "weapons", "floor", "lighting"
-    // and "freeze"). The view's own: another view of the same actor may draw them otherwise.
+    // An actor view's display hints (Host's ApplyHints; the API's "pose", "motion", "weapons", "floor", "lighting",
+    // "freeze", "aim" and "scale"). The view's own: another view of the same actor may draw them otherwise.
     struct ViewHints
     {
         bool                       captured = false;   // the captured pose, else the classic doll
@@ -11063,6 +11236,8 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         bool                       floor    = true;
         MirrorLightingCore::Preset lighting = MirrorLightingCore::kDefaultPreset;
         bool                       freeze   = false;   // draw the look held when it froze (FreezeCore, TendActorLive)
+        StillShotCore::Aim         aim      = StillShotCore::Aim::kFigure;   // the camera faces the drawn head (FaceAimCore)
+        float                      scale    = 1.0f;   // the view's actor's size over the game's (PlayMirrorClip)
     };
     // The current actor view's (ActorViewScope; defined beside ActorView).
     static LiveImage& ActorImg();
@@ -11177,6 +11352,8 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         float                                 pitchDeg = 4.0f;
         MirrorLightingCore::Preset            lighting = MirrorLightingCore::Preset::kHearth;
         bool                                  weapons  = false;
+        StillShotCore::Aim                    aim      = StillShotCore::Aim::kFigure;   // a head shot's only
+        float                                 zoom     = 1.0f;                          // a head shot's only
     };
     static auto& s_portrait = NeverDestroyed<PortraitJob>();
 
@@ -11497,6 +11674,14 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
     // position: PickHeadAnchor writes it with headAboveFeet and the collect copies it into its
     // ActorLiveState::headOffset. Under LiveLock.
     static XMFLOAT3 s_lastHeadOffset{ NAN, NAN, NAN };
+    // The same head's world (ActorLiveState::head) and, when the pose is captured, the live bone it was read from,
+    // which the view follows (ActorLiveState::headNode); the collect takes the node and clears this.
+    static XMFLOAT4X4      s_lastHeadWorld{};
+    static bool            s_lastHeadWorldValid = false;
+    static RE::NiAVObject* s_lastHeadNode       = nullptr;
+    // ...and the race skeleton's rest head from its root (SkeletonNif::headFromRoot), read inside the collect's net.
+    static XMFLOAT4X4      s_lastHeadRest{};
+    static bool            s_lastHeadRestValid = false;
 
     // Why a live view cannot start here, or null; starts the shader compile
     // otherwise. "unrenderable": the
@@ -12427,6 +12612,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         int      lastF0 = -1, lastF1 = -1;
         float    lastU = -1.0f;
         XMFLOAT4 lastRoot{};
+        float    lastScale = 1.0f;   // the figure scale the last pose was made at
         std::vector<MC::FramePos> lastLayerPos;
 
         const ClipTake& Cur() const { return takes[static_cast<std::size_t>(cur)]; }
@@ -12546,6 +12732,13 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         float                         frontYawDeg = 0.0f;
         // The drawn head bone from the actor's position at the collect (NaN without one): a head shot's aim.
         XMFLOAT3                      headOffset{ NAN, NAN, NAN };
+        // The head as drawn, for an aim at the face: the collect's, then each frame the follow's (RefreshLivePose,
+        // from headNode) or the clip's (PlayMirrorClip). headNode: the live head bone a captured collect drew on.
+        DrawnHead                     head;
+        RE::NiPointer<RE::NiAVObject> headNode;
+        // The face camera (FaceAimCore, TendFaceAim) and when it last stepped.
+        FaceAimCore::Follow                   faceFollow;
+        std::chrono::steady_clock::time_point faceAt{};
         // The orbit yaw facing the front of the geometry as drawn (MirrorCameraCore::FacingYawDeg of the heading it
         // was last posed at: a collect, a follow re-pose that did not fault, the clip player's root): a look kept
         // when the NPC leaves is stored with it.
@@ -12705,10 +12898,14 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         std::uint64_t  castingSigTried = 0;
 
         // An actor of a scene drawn in another's view (TendSceneExtras): its clip plays at placePos / placeAngle
-        // (radians, the engine's heading), not where it stands (PlayMirrorClip).
+        // (radians, the engine's heading), not where it stands, at placeScale times its size (PlayMirrorClip).
         bool                                  placed     = false;
         XMFLOAT3                              placePos{ 0, 0, 0 };
         float                                 placeAngle = 0.0f;
+        float                                 placeScale = 1.0f;
+        // The figure scale the pieces were last posed at (PlayMirrorClip; 1 from a collect and the live follow). A
+        // look posed at another size is never kept as the actor's (StoreKept's callers).
+        float                                 posedScale = 1.0f;
         std::chrono::steady_clock::time_point extraNextCollect{};
         std::chrono::steady_clock::time_point extraFollowUpAt{};   // once more after a rebuild ({} = none)
         int                                   extraCollects = 0;
@@ -12719,8 +12916,9 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         std::unordered_map<std::string, std::string> rideMemory;
 
         // Drops the entries with everything that belongs to them: the live face state, the live physics, the casting
-        // art's particles, the still test's node and the root pinning the graph they came from. The view's rect,
-        // camera and session state stay.
+        // art's particles, the still test's node, the live head bone the face aim follows (the head's last world,
+        // `head`, stays: a kept or frozen look is drawn as it was) and the root pinning the graph they came from. The
+        // view's rect, camera and session state stay.
         void DropGeometry()
         {
             geometry.clear();
@@ -12735,6 +12933,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             sigLooked       = false;
             clipProjectRead = false;
             root.reset();
+            headNode.reset();
         }
 
         // Arms one debounced recollect after a collect that succeeded: while equipDirtyAt stays `now` the entries
@@ -12997,12 +13196,12 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
     // Keeps a look as the NPC's in the current actor view's pose and weapons (s_keptLooks), dropping the oldest past
     // the capacity and past the memory budget.
     static void StoreKept(RE::FormID fid, std::vector<GeometryEntry> geometry, const XMFLOAT3& centre,
-                          const XMFLOAT3& collectPos, float facingYawDeg, float frameScale)
+                          const XMFLOAT3& collectPos, float facingYawDeg, float frameScale, const DrawnHead& head)
     {
         auto       resources = KeptResources(geometry);
         const auto key       = KeptKeyOf(fid);
         s_keptLooks[key] =
-            KeptLook{ std::move(geometry), centre, collectPos, facingYawDeg, frameScale, std::move(resources) };
+            KeptLook{ std::move(geometry), centre, collectPos, facingYawDeg, frameScale, head, std::move(resources) };
         for (const auto& old : s_keptOrder.Touch(key)) s_keptLooks.erase(old);
 
         const std::vector<LastCaptureCore::LookKey> order = s_keptOrder.Order();   // a copy: the loop below erases from it
@@ -14100,27 +14299,31 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         if (headAboveFeet) {
             // What the view draws: the live head as captured; in the classic pose the drawn head, else the rest
             // pose's (a giant's head is out of the bind band), else the live one.
-            float headZ = std::numeric_limits<float>::quiet_NaN();
+            XMMATRIX drawnHead     = XMMatrixIdentity();
+            bool     haveDrawnHead = true;
             if (!s_capturedPose && bindHeadWon) {
-                headZ = XMVectorGetZ(headBoneWorld.r[3]);
+                drawnHead = headBoneWorld;
             } else if (const XMMATRIX* rest = s_capturedPose ? nullptr : RestWorldOf(s_liveHeadNode)) {
-                headZ = XMVectorGetZ(rest->r[3]);
+                drawnHead = *rest;
             } else if (s_liveHeadNode) {
-                headZ = s_liveHeadNode->world.translate.z;
+                drawnHead = NiTransformToXM(s_liveHeadNode->world);
+            } else {
+                haveDrawnHead = false;
             }
-            *headAboveFeet = headZ - actor->GetPosition().z;
-            // The same head, all three axes, for a head shot's aim (StillShotCore::HeadShotTarget).
+            XMFLOAT3 head{ NAN, NAN, NAN };
+            if (haveDrawnHead) XMStoreFloat3(&head, drawnHead.r[3]);
             const RE::NiPoint3 pos = actor->GetPosition();
-            XMFLOAT3           head{ NAN, NAN, NAN };
-            if (!s_capturedPose && bindHeadWon) {
-                XMStoreFloat3(&head, headBoneWorld.r[3]);
-            } else if (const XMMATRIX* rest = s_capturedPose ? nullptr : RestWorldOf(s_liveHeadNode)) {
-                XMStoreFloat3(&head, rest->r[3]);
-            } else if (s_liveHeadNode) {
-                const auto& t = s_liveHeadNode->world.translate;
-                head = XMFLOAT3(t.x, t.y, t.z);
-            }
+            *headAboveFeet         = head.z - pos.z;
+            // The same head, all three axes, for a head shot's aim (StillShotCore::HeadShotTarget).
             s_lastHeadOffset = XMFLOAT3(head.x - pos.x, head.y - pos.y, head.z - pos.z);
+            // ...and its world, for an aim at the face.
+            XMStoreFloat4x4(&s_lastHeadWorld, drawnHead);
+            s_lastHeadWorldValid = haveDrawnHead && MatrixIsFinite(drawnHead);
+            s_lastHeadNode       = s_lastHeadWorldValid && s_capturedPose ? s_liveHeadNode : nullptr;
+            if (const SkeletonNif* nif = s_lastHeadWorldValid ? ResolveSkeletonNif(actor) : nullptr; nif && nif->headFound) {
+                XMStoreFloat4x4(&s_lastHeadRest, nif->headFromRoot);
+                s_lastHeadRestValid = true;
+            }
         }
 
         // One line per actor: a standing diagnostic for the anchor picker.
@@ -14284,6 +14487,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
                             actor->GetFormID());
             return false;
         }
+        BeginPosedPass(root, actor->GetFormID());   // ended with the collect's scope (ResetCollectScope)
         const bool honourHidden = HonoursHiddenBelowRoot(actor, root);
 
         DetectHairCover(actor, root, honourHidden);
@@ -14434,6 +14638,9 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             castingArts.clear();
             noVbIb        = 0;
             headAboveFeet = std::numeric_limits<float>::quiet_NaN();
+            s_lastHeadWorldValid = false;   // PickHeadAnchor sets them
+            s_lastHeadNode       = nullptr;
+            s_lastHeadRestValid  = false;
             return RunGuarded([&]() {
                 BuildBoneBindMap(actor);
                 // After the bind map: a bone it does not place rides its bind. Never for a figure held for unbound
@@ -14470,6 +14677,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         const bool texturesPending = s_texLoadDeferred.exchange(false, std::memory_order_relaxed);
         ClearBoneBindMap();
         ClearRestPose();
+        EndPosedPass();
         s_castingArts.clear();   // a faulted walk never handed them over; they pin the art's 3D
         std::vector<CollectFace> collectFaces = std::move(s_collectFaces);
         s_collectFaces.clear();
@@ -14632,15 +14840,22 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         }
         lv.frameScale = settled;
         lv.headOffset = s_lastHeadOffset;
+        lv.head.world = s_lastHeadWorld;
+        lv.head.have  = s_lastHeadWorldValid;
+        lv.headNode   = RE::NiPointer<RE::NiAVObject>(s_lastHeadNode);
+        s_lastHeadNode = nullptr;
+        lv.head.restFromRoot = s_lastHeadRest;
+        lv.head.haveRest     = s_lastHeadRestValid;
         const auto pos = actor->GetPosition();
         lv.centre     = XMFLOAT3(pos.x, pos.y, pos.z + kActorChestHeight * lv.frameScale);
         lv.collectPos = XMFLOAT3(pos.x, pos.y, pos.z);
+        lv.posedScale = 1.0f;
         lv.poseYawDeg = MirrorCameraCore::FacingYawDeg(actor->GetAngleZ());
         // A scene's extra keeps no look: the view's actor is the one a later view shows while they cannot be drawn.
         if (!into && !InPortrait() &&
             LastCaptureCore::KeepsCollect(texturesPending, noVbIb > 0 || leftOutOwed, TryOnOpen(actor))) {
             StoreKept(actor->GetFormID(), FrozenCopy(lv.geometry), lv.centre, lv.collectPos, lv.poseYawDeg,
-                      lv.frameScale);
+                      lv.frameScale, lv.head);
         }
         return true;
     }
@@ -14824,9 +15039,10 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             lv.recollectFails.Reset();
             if (!lv.geometry.empty() && !InPortrait()) {
                 auto frozen = FrozenCopy(lv.geometry);
-                if (LastCaptureCore::KeepsAtLeave(lv.collectComplete, s_keptLooks.contains(KeptKeyOf(lv.fid)),
+                if (lv.posedScale == 1.0f &&
+                    LastCaptureCore::KeepsAtLeave(lv.collectComplete, s_keptLooks.contains(KeptKeyOf(lv.fid)),
                                                   TryOnOpen(actor))) {
-                    StoreKept(lv.fid, frozen, lv.centre, lv.collectPos, lv.poseYawDeg, lv.frameScale);
+                    StoreKept(lv.fid, frozen, lv.centre, lv.collectPos, lv.poseYawDeg, lv.frameScale, lv.head);
                 }
                 EnterKeptLook(lv, std::move(frozen), now);
                 SKSE::log::warn("MannequinRenderer/live: recollect of {:08X} failed {} times in a row on the same "
@@ -14861,12 +15077,13 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         const bool gone = verdict == LVL::Recollect::EndGone;
         if (!gone && !lv.geometry.empty()) {
             // They left while the mirror showed them: it keeps them as they last drew, made still (no hold on their
-            // skeleton), and waits for them. That becomes their look unless it was a try-on, or it is incomplete
-            // (textures still owed, pieces skipped) and a look of them is already kept.
+            // skeleton), and waits for them. That becomes their look unless it was a try-on, it was posed at another
+            // size than their own, or it is incomplete (textures still owed, pieces skipped) and a look of them is
+            // already kept.
             auto frozen = FrozenCopy(lv.geometry);
-            if (actor && !InPortrait() &&
+            if (actor && !InPortrait() && lv.posedScale == 1.0f &&
                 LastCaptureCore::KeepsAtLeave(lv.collectComplete, s_keptLooks.contains(KeptKeyOf(lv.fid)), TryOnOpen(actor))) {
-                StoreKept(lv.fid, frozen, lv.centre, lv.collectPos, lv.poseYawDeg, lv.frameScale);
+                StoreKept(lv.fid, frozen, lv.centre, lv.collectPos, lv.poseYawDeg, lv.frameScale, lv.head);
             }
             EnterKeptLook(lv, std::move(frozen), now);
             SKSE::log::info("MannequinRenderer/live: {:08X} left - the view keeps their last look{}", lv.fid,
@@ -15055,6 +15272,10 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         static thread_local std::vector<const std::vector<XMFLOAT4X4>*> refilled;
         refilled.clear();
         auto* actor = RE::TESForm::LookupByID<RE::Actor>(lv.fid);
+        // The bones are read as the view poses them (PosedWorld) for the whole tick, the simulation's included.
+        // lv.root is the graph the entries came from, which the view pins.
+        BeginPosedPass(lv.root.get(), lv.fid);
+        lv.posedScale = 1.0f;
         XMFLOAT3 moved{ 0, 0, 0 };
         if (actor) {
             const auto pos = actor->GetPosition();
@@ -15079,7 +15300,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
                 const auto posed = lv.sim.of.find(g.liveAnchor.get());
                 g.worldMatrix    = posed != lv.sim.of.end() && static_cast<std::size_t>(posed->second) < lv.sim.world.size()
                                        ? XMLoadFloat4x4(&lv.sim.world[static_cast<std::size_t>(posed->second)])
-                                       : NiTransformToXM(g.liveAnchor->world);
+                                       : PosedWorld(g.liveAnchor.get());
                 if (g.hasAnchorLocal) g.worldMatrix = XMMatrixMultiply(XMLoadFloat4x4(&g.anchorLocal), g.worldMatrix);
                 g.sortCentre     = DrawnBoundCentre(g.geom, g.worldMatrix);
                 if (g.hasNormalRotOverride && actorRoot) g.normalRotOverride = NiTransformToXM(actorRoot->world);
@@ -15089,6 +15310,19 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         for (auto& a : lv.castingFx.arts) {
             if (a.magicNode) XMStoreFloat4x4(&a.magicDrawn, NiTransformToXM(a.magicNode->world));
         }
+        if (lv.headNode) {
+            const XMMATRIX w = PosedWorld(lv.headNode.get());
+            if (MatrixIsFinite(w)) {
+                XMStoreFloat4x4(&lv.head.world, w);
+                // The figure aim's head shot follows it too (StillShotCore::HeadShotTarget): the pose goes on moving
+                // after the collect that measured headOffset.
+                if (actor) {
+                    const auto pos = actor->GetPosition();
+                    lv.headOffset  = XMFLOAT3(lv.head.world._41 - pos.x, lv.head.world._42 - pos.y, lv.head.world._43 - pos.z);
+                }
+            }
+        }
+        EndPosedPass();
     }
 
     static void CollectNamedNodes(RE::NiAVObject* root, std::vector<std::pair<const char*, RE::NiAVObject*>>& nodes,
@@ -17090,11 +17324,11 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             n.parent = parent[static_cast<std::size_t>(li)] >= 0 ? nodeOf[static_cast<std::size_t>(parent[static_cast<std::size_t>(li)])] : -1;
             if (plan.role[static_cast<std::size_t>(li)] == LPC::NodeRole::kSimulated) {
                 ClipPlayer::Spring s  = chosen[static_cast<std::size_t>(li)];
-                const XMMATRIX     w  = NiTransformToXM(o->world);
-                const XMMATRIX     pw = NiTransformToXM(o->parent->world);
+                const XMMATRIX     w  = PosedWorld(o);
+                const XMMATRIX     pw = PosedWorld(o->parent);
                 if (s.source == ClipPlayer::Spring::Source::kCbpc) {
                     if (MP::CbpcIsBreastBone(o->name.c_str())) n.gravity = RE::NiPointer<RE::NiAVObject>(spine2);
-                    const XMMATRIX gw = n.gravity ? NiTransformToXM(n.gravity->world) : XMMatrixIdentity();
+                    const XMMATRIX gw = n.gravity ? PosedWorld(n.gravity.get()) : XMMatrixIdentity();
                     s.rest            = CbpcRestAt(s.cbpc, pw, n.gravity ? &gw : nullptr);
                     n.spring          = static_cast<std::int32_t>(sim.springs.size());
                     ++sim.cbpc;
@@ -17105,7 +17339,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
                     if (auto* node = o->AsNode()) {
                         for (auto& c : node->GetChildren()) {
                             if (!c) continue;
-                            const XMVECTOR cp = XMVectorSet(c->world.translate.x, c->world.translate.y, c->world.translate.z, 1.0f);
+                            const XMVECTOR cp = XMVectorSetW(PosedWorld(c.get()).r[3], 1.0f);
                             if (XMVectorGetX(XMVector3Length(XMVectorSubtract(cp, w.r[3]))) < 0.5f) continue;
                             tip = cp;
                             break;
@@ -17191,7 +17425,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             auto&           n  = sim.nodes[i];
             RE::NiAVObject* o  = n.obj.get();
             const XMMATRIX  pw = n.parent >= 0 ? XMLoadFloat4x4(&sim.world[static_cast<std::size_t>(n.parent)])
-                                               : (o->parent ? NiTransformToXM(o->parent->world) : XMMatrixIdentity());
+                                               : (o->parent ? PosedWorld(o->parent) : XMMatrixIdentity());
             XMMATRIX w = XMMatrixMultiply(NiTransformToXM(o->local), pw);
             if (n.spring >= 0) {
                 auto& s = sim.springs[static_cast<std::size_t>(n.spring)];
@@ -17200,16 +17434,16 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
                               : (o->parent && LPC::WrittenOverLocal(ToRestXf(o->world), ToRestXf(o->parent->world), ToRestXf(o->local)));
                 // The spring steps either way, so it is warm when the game lets the bone go. CBPC moves a bone by
                 // its local, which the rest already carries; FSMP writes its world.
-                const XMMATRIX gw     = n.gravity ? NiTransformToXM(n.gravity->world) : XMMatrixIdentity();
+                const XMMATRIX gw     = n.gravity ? PosedWorld(n.gravity.get()) : XMMatrixIdentity();
                 const XMMATRIX sprung = ApplySpring(s, w, pw, n.gravity ? &gw : nullptr, ref, dt, moving);
                 if (!n.game) {
                     w = sprung;
                 } else {
-                    if (s.source != ClipPlayer::Spring::Source::kCbpc) w = NiTransformToXM(o->world);
+                    if (s.source != ClipPlayer::Spring::Source::kCbpc) w = PosedWorld(o);
                     game = true;
                 }
             }
-            if (!MatrixIsFinite(w)) w = NiTransformToXM(o->world);
+            if (!MatrixIsFinite(w)) w = PosedWorld(o);
             XMStoreFloat4x4(&sim.world[i], w);
         }
         if (game) ++sim.gameMoved;
@@ -17317,16 +17551,17 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
     // stray a few units at most.
     constexpr float kStaleWorldGap = 100.0f;
 
-    static void BuildClipRig(RE::NiAVObject* root, std::vector<ClipRigNode>& nodes, ClipRig& rig)
+    static void BuildClipRig(RE::NiAVObject* root, RE::FormID fid, std::vector<ClipRigNode>& nodes, ClipRig& rig)
     {
         std::vector<std::pair<RE::NiAVObject*, std::int32_t>> stack{ { root, -1 } };
         constexpr std::size_t                                 kMaxRigNodes = 8192;
+        BeginPosedPass(root, fid);   // a world another mod left shrunk is the rig's from its chain as well
         while (!stack.empty() && nodes.size() < kMaxRigNodes) {
             const auto [obj, parent] = stack.back();
             stack.pop_back();
             if (!obj) continue;
             const auto idx = static_cast<std::int32_t>(nodes.size());
-            XMMATRIX   w   = NiTransformToXM(obj->world);
+            XMMATRIX   w   = PosedWorld(obj);
             if (parent >= 0) {
                 const XMMATRIX chain = XMMatrixMultiply(NiTransformToXM(obj->local), rig.liveWorld[static_cast<std::size_t>(parent)]);
                 const float    gap   = XMVectorGetX(XMVector3Length(XMVectorSubtract(chain.r[3], w.r[3])));
@@ -17360,6 +17595,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
                 }
             }
         }
+        EndPosedPass();
     }
 
     // A bone farther than this (game units) from every driven one stays where it is.
@@ -18494,7 +18730,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
 
         ClipPlayer cp;
         ClipRig    rig;
-        BuildClipRig(root, cp.nodes, rig);
+        BuildClipRig(root, lv.fid, cp.nodes, rig);
         float s0 = pick.engineTime - pick.lo;
         if (resumeKey == reinterpret_cast<std::uintptr_t>(pick.anim)) s0 = lv.clipResumeTime - pick.lo;
         ClipTake          primary;
@@ -18623,7 +18859,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
 
         std::vector<ClipRigNode> nodes;
         ClipRig                  rig;
-        BuildClipRig(root, nodes, rig);
+        BuildClipRig(root, lv.fid, nodes, rig);
         int kept = 0;
         for (const ClipPick* p : want) {
             ClipTake    t;
@@ -18866,6 +19102,10 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             angle = actor->GetAngleZ();
         }
         const XMFLOAT4 rootKey(pos.x, pos.y, pos.z, angle);
+        // The size the figure is drawn at over the game's: a scene entry's, or the view's "scale" hint for its own
+        // actor while the idle a client chose plays them. The idle cycle hands back to the live bones, which are
+        // their own size, and a shot draws them as they are.
+        const float scale = lv.placed ? lv.placeScale : (InPortrait() || cp.pinned.empty()) ? 1.0f : ActorHints().scale;
         // The springs' frame time, and the camera's turn since their last step: the tips turn with the camera about
         // the actor, so the body turns past them on screen and they swing back.
         float springDt   = 0.0f;
@@ -18890,16 +19130,18 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         }
         if (!blend && !cp.springsMoving && !springTurn && layersSame && f0 == cp.lastF0 && f1 == cp.lastF1 && std::fabs(u - cp.lastU) < 1e-4f &&
             rootKey.x == cp.lastRoot.x && rootKey.y == cp.lastRoot.y && rootKey.z == cp.lastRoot.z &&
-            rootKey.w == cp.lastRoot.w) {
+            rootKey.w == cp.lastRoot.w && scale == cp.lastScale) {
             return false;
         }
         // The baked root, turned by the actor's change of heading about their
         // position and moved with them. Skyrim's heading turns clockwise seen
-        // from above (facing = sin, cos), DirectXMath's Z rotation the other way.
+        // from above (facing = sin, cos), DirectXMath's Z rotation the other way. The figure scale is applied
+        // about their position, so their feet stay where they stand.
         const XMMATRIX rootW = XMMatrixMultiply(
             XMMatrixMultiply(XMLoadFloat4x4(&cp.rootAtBake),
                              XMMatrixTranslation(-cp.posAtBake.x, -cp.posAtBake.y, -cp.posAtBake.z)),
-            XMMatrixMultiply(XMMatrixRotationZ(-(angle - cp.angleAtBake)), XMMatrixTranslation(pos.x, pos.y, pos.z)));
+            XMMatrixMultiply(XMMatrixMultiply(XMMatrixScaling(scale, scale, scale), XMMatrixRotationZ(-(angle - cp.angleAtBake))),
+                             XMMatrixTranslation(pos.x, pos.y, pos.z)));
         static thread_local std::vector<XMMATRIX> world;
         world.resize(cp.nodes.size());
         world[0] = rootW;
@@ -18969,7 +19211,12 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             }
         }
         cp.lastWorld.resize(cp.nodes.size());
-        for (std::size_t i = 0; i < cp.nodes.size(); ++i) XMStoreFloat4x4(&cp.lastWorld[i], world[i]);
+        for (std::size_t i = 0; i < cp.nodes.size(); ++i) {
+            XMStoreFloat4x4(&cp.lastWorld[i], world[i]);
+            if (lv.headNode && cp.nodes[i].obj == lv.headNode.get() && MatrixIsFinite(world[i])) {
+                XMStoreFloat4x4(&lv.head.world, world[i]);
+            }
+        }
         for (auto& sk : cp.skins) {
             auto& pal = *sk.palette;
             for (std::size_t i = 0; i < sk.rig.size() && i < pal.size(); ++i) {
@@ -19007,11 +19254,14 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             g.sortCentre  = DrawnBoundCentre(g.geom, g.worldMatrix);
             if (g.hasNormalRotOverride) g.normalRotOverride = rootW;
         }
+        // The chest anchor stays their own size's: the floor is measured down from it (DrawActorLiveFrame).
         lv.centre   = XMFLOAT3(pos.x, pos.y, pos.z + kActorChestHeight * lv.frameScale);
         cp.lastF0   = f0;
         cp.lastF1   = f1;
         cp.lastU    = u;
-        cp.lastRoot = rootKey;
+        cp.lastRoot  = rootKey;
+        cp.lastScale = scale;
+        lv.posedScale = scale;
         cp.lastLayerPos.assign(layerPos.begin(), layerPos.end());
         cp.springsMoving = springsMoving;
         lv.poseYawDeg    = MirrorCameraCore::FacingYawDeg(angle);   // the heading the root was posed at
@@ -19451,22 +19701,37 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
     // A preset light as a world direction toward it: its yaw from its frame's forward (the camera, the figure's
     // front or the game's north), then raised by its up. The rim, behind the figure (a camera light at 180),
     // is the camera direction negated, pitch included: the same rim as MakeLightRig's.
-    static XMFLOAT4 LookLightDir(const MirrorLightingCore::Light& l, FXMVECTOR camDir, FXMVECTOR figureFront)
+    // `faceUp`: with an aim at the face (FaceAimCore), the face's up, which the figure and camera lights (the rim
+    // included) turn about and rise along in place of the world's, so a face is lit as if it stood however it lies;
+    // null otherwise.
+    static XMFLOAT4 LookLightDir(const MirrorLightingCore::Light& l, FXMVECTOR camDir, FXMVECTOR figureFront,
+                                 const XMVECTOR* faceUp)
     {
         using MirrorLightingCore::Frame;
         XMVECTOR v;
+        bool     alongFace = false;
         if (l.frame == Frame::kWorld) {
             const float y = XMConvertToRadians(l.yawDeg);
             v = XMVectorSet(std::sin(y), std::cos(y), 0.0f, 0.0f);
         } else if (l.frame == Frame::kCamera && std::fabs(l.yawDeg - 180.0f) < 1e-3f) {
             v = XMVectorScale(camDir, -1.0f);
+            if (faceUp) {
+                v         = XMVectorAdd(v, XMVectorScale(*faceUp, l.up));
+                alongFace = true;
+            }
         } else {
             const XMVECTOR base = l.frame == Frame::kFigure ? figureFront : camDir;
-            v = XMVector3TransformNormal(base, XMMatrixRotationZ(XMConvertToRadians(l.yawDeg)));
+            if (faceUp) {
+                v = XMVectorAdd(XMVector3TransformNormal(base, XMMatrixRotationAxis(*faceUp, XMConvertToRadians(l.yawDeg))),
+                                XMVectorScale(*faceUp, l.up));
+                alongFace = true;
+            } else {
+                v = XMVector3TransformNormal(base, XMMatrixRotationZ(XMConvertToRadians(l.yawDeg)));
+            }
         }
         XMFLOAT3 t;
         XMStoreFloat3(&t, v);
-        t.z += l.up;
+        if (!alongFace) t.z += l.up;
         XMFLOAT4 out;
         XMStoreFloat4(&out, XMVector3Normalize(XMVectorSet(t.x, t.y, t.z, 0.0f)));
         out.w = 0.0f;
@@ -19478,12 +19743,13 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         return XMFLOAT4(l.color.r, l.color.g, l.color.b, l.intensity);
     }
 
-    static LightRig MakeLookRig(const MirrorLightingCore::Look& look, FXMVECTOR camDir, FXMVECTOR figureFront)
+    static LightRig MakeLookRig(const MirrorLightingCore::Look& look, FXMVECTOR camDir, FXMVECTOR figureFront,
+                                const XMVECTOR* faceUp = nullptr)
     {
         LightRig rig{};
-        rig.keyDir    = LookLightDir(look.key, camDir, figureFront);
-        rig.fillDir   = LookLightDir(look.fill, camDir, figureFront);
-        rig.rimDir    = LookLightDir(look.rim, camDir, figureFront);
+        rig.keyDir    = LookLightDir(look.key, camDir, figureFront, faceUp);
+        rig.fillDir   = LookLightDir(look.fill, camDir, figureFront, faceUp);
+        rig.rimDir    = LookLightDir(look.rim, camDir, figureFront, faceUp);
         rig.keyColor  = LookLightColor(look.key);
         rig.fillColor = LookLightColor(look.fill);
         rig.rimColor  = LookLightColor(look.rim);
@@ -20093,6 +20359,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             const auto      place = ViewRegistryCore::ScenePlace(op.x, op.y, op.z, oa, c);
             e.placePos            = XMFLOAT3(place.x, place.y, place.z);
             e.placeAngle          = place.angle;
+            e.placeScale          = c.scale;
             auto* actor  = RE::TESForm::LookupByID<RE::Actor>(c.actor);
             const bool followUp = e.extraFollowUpAt != std::chrono::steady_clock::time_point{} && now >= e.extraFollowUpAt &&
                                   !e.geometry.empty();
@@ -20108,8 +20375,8 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
                 if (!RunGuarded([&]() { ok = CollectActorLiveGeometry(actor, false, nullptr, &e); })) ok = false;
                 if (ok && first) {
                     SKSE::log::info("MannequinRenderer/scene: {:08X} joins {:08X}'s view: {} pieces, offset ({:.1f}, "
-                                    "{:.1f}, {:.1f}) turned {:.1f} degrees", c.actor, lv.fid, e.geometry.size(), c.x,
-                                    c.y, c.z, c.r);
+                                    "{:.1f}, {:.1f}) turned {:.1f} degrees, at {:.3f} of their size", c.actor, lv.fid,
+                                    e.geometry.size(), c.x, c.y, c.z, c.r, c.scale);
                 } else if (!ok && first && e.extraCollects == 1) {
                     SKSE::log::info("MannequinRenderer/scene: {:08X} cannot be drawn in {:08X}'s view yet - tried "
                                     "again", c.actor, lv.fid);
@@ -20676,6 +20943,42 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         return true;
     }
 
+    static FaceAimCore::M3 ToM3(const XMFLOAT4X4& m)
+    {
+        FaceAimCore::M3 o;
+        o.m[0][0] = m._11; o.m[0][1] = m._12; o.m[0][2] = m._13;
+        o.m[1][0] = m._21; o.m[1][1] = m._22; o.m[1][2] = m._23;
+        o.m[2][0] = m._31; o.m[2][1] = m._32; o.m[2][2] = m._33;
+        return o;
+    }
+
+    // Steps the face camera (lv.faceFollow) toward the drawn head this frame: its frame (FaceAimCore::HeadFrame), else
+    // the figure's front, and its target, else over the chest anchor as a Portrait shot frames a humanoid. The target
+    // is kept from the chest anchor (the frame's draw origin), where a float settles, and follows the actor's moves at
+    // once. A shot takes them as they are; a live view follows with a lag and draws again until it settles.
+    static void TendFaceAim(ActorLiveState& lv, bool shot)
+    {
+        namespace FA = FaceAimCore;
+        const float figure = lv.frameScale;
+        FA::Frame   frame  = FA::FigureFrame(lv.frontYawDeg);
+        // Under the head bone by a shot's zoom (the frame closes from below); a live view's zoom keeps the bone's offset.
+        const float below  = shot ? StillShotCore::HeadBelowBone(s_portrait.zoom) : StillShotCore::kHeadBelowBone;
+        FA::V3      target{ 0.0f, 0.0f, (StillShotCore::kHeadTargetLift + StillShotCore::kHeadBelowBone - below) * figure };
+        if (lv.head.have) {
+            FA::Frame byHead;
+            if (lv.head.haveRest && FA::HeadFrame(ToM3(lv.head.restFromRoot), ToM3(lv.head.world), byHead)) frame = byHead;
+            target = FA::Target({ lv.head.world._41 - lv.centre.x, lv.head.world._42 - lv.centre.y,
+                                  lv.head.world._43 - lv.centre.z },
+                                frame, figure, below);
+        }
+        const auto  now = std::chrono::steady_clock::now();
+        const float dt  = lv.faceAt == std::chrono::steady_clock::time_point{}
+                              ? 0.0f
+                              : std::chrono::duration<float>(now - lv.faceAt).count();
+        lv.faceAt = now;
+        if (FA::Step(lv.faceFollow, frame, target, dt, shot)) ActorImg().dirty = true;
+    }
+
     // One live actor frame: the lighting preset's backdrop clear, the chest-anchored trackball camera, the preset's
     // light rig, the key and fill shadow maps, the floor (the floor hint), then the opaque, strand, overlay and
     // blended-gear passes, each piece through DrawLivePiece as in the item view; the offscreen is then published
@@ -20739,6 +21042,14 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         // A shot draws every frame until it is taken, in its own light whatever the mirror's preset.
         const bool portrait = InPortrait() && s_portrait.fid == lv.fid;
         if (portrait) ActorImg().dirty = true;
+        // An aim at the face: a Portrait shot's or the view's (the "aim" hint); a Cutout shot keeps the figure.
+        const bool faceAim = portrait ? s_portrait.head && s_portrait.aim == StillShotCore::Aim::kFace
+                                      : ActorHints().aim == StillShotCore::Aim::kFace;
+        if (faceAim) {
+            TendFaceAim(lv, portrait);
+        } else {
+            lv.faceFollow.have = false;   // the next aim at the face starts where the face looks then
+        }
         const MirrorLightingCore::Look look =
             portrait ? MirrorLightingCore::PresetLook(s_portrait.lighting) : CurrentMirrorLook(lv);
 
@@ -20792,7 +21103,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         const bool  headShot = portrait && s_portrait.head;
         const StillShotCore::V3 headAim =
             headShot ? StillShotCore::HeadShotTarget({ lv.headOffset.x, lv.headOffset.y, lv.headOffset.z }, figure,
-                                                     kActorChestHeight)
+                                                     kActorChestHeight, s_portrait.zoom)
                      : StillShotCore::V3{};
         XMVECTOR    target   = XMVectorAdd(centre, headShot ? XMVectorSet(headAim.x, headAim.y, headAim.z, 0.0f)
                                                             : XMVectorSet(lv.pan.x, lv.pan.y, lv.pan.z, 0.0f));
@@ -20801,14 +21112,30 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         // A scene spreads its actors and standing props about the view's actor's place: the camera, far plane and
         // shadows take them in.
         const float group  = sceneShown ? kSceneFrameScale : 1.0f;
-        const float dist   = headShot ? StillShotCore::kHeadDistance * figure : kActorCamDistance * figure * lv.zoomMult * group;
+        const float dist   = headShot ? StillShotCore::kHeadDistance * figure / s_portrait.zoom
+                                      : kActorCamDistance * figure * lv.zoomMult * group;
         XMVECTOR cameraPos = XMVectorAdd(target, XMVectorSet(
             std::sin(yawRad) * std::cos(pitRad) * dist,
             -std::cos(yawRad) * std::cos(pitRad) * dist,
             std::sin(pitRad) * dist,
             0.0f));
-        XMVECTOR up   = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);  // Skyrim is Z-up
-        XMMATRIX view = LiveViewMatrix(cameraPos, target, up);
+        XMVECTOR up    = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);  // Skyrim is Z-up
+        XMVECTOR camUp = up;
+        // An aim at the face: the camera faces the drawn head (TendFaceAim) with its crown up in the picture, turned
+        // and raised from there by the shot's turn and pitch or the user's orbit; a live view's zoom closes on the
+        // face rather than the pointer.
+        if (faceAim) {
+            const auto& fa  = lv.faceFollow.frame;
+            const auto  cam = FaceAimCore::Orbit(
+                fa, portrait ? s_portrait.turnDeg : MirrorCameraCore::YawTurnDeg(lv.frontYawDeg, lv.yawDeg),
+                portrait ? s_portrait.pitchDeg : lv.pitchDeg);
+            const float faceDist = portrait ? dist : StillShotCore::kHeadDistance * figure * lv.zoomMult;
+            const auto& t        = lv.faceFollow.target;   // from the chest anchor, the draw origin (TendFaceAim)
+            target    = XMVectorSet(t.x, t.y, t.z, 1.0f);
+            cameraPos = XMVectorAdd(target, XMVectorScale(XMVectorSet(cam.dir.x, cam.dir.y, cam.dir.z, 0.0f), faceDist));
+            camUp     = XMVectorSet(cam.up.x, cam.up.y, cam.up.z, 0.0f);
+        }
+        XMMATRIX view = LiveViewMatrix(cameraPos, target, camUp);
         XMMATRIX proj = XMMatrixPerspectiveFovLH(
             XMConvertToRadians(kActorFovDeg), aspect,
             10.0f,              // near plane
@@ -20817,23 +21144,36 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         XMVECTOR camDir = XMVector3Normalize(XMVectorSubtract(cameraPos, target));
 
         // ── Actor light rig: the lighting preset's (MirrorLightingCore; Hearth by default) ──
-        // A figure-fixed light is measured from the front the view began facing.
+        // A figure-fixed light is measured from the front the view began facing, or with an aim at the face from where
+        // the face looks, the rig turned about its up.
         const float    frontRad = XMConvertToRadians(lv.frontYawDeg);
-        const XMVECTOR figureFront = XMVectorSet(std::sin(frontRad), -std::cos(frontRad), 0.0f, 0.0f);
-        const LightRig rig = MakeLookRig(look, camDir, figureFront);
+        XMVECTOR       figureFront = XMVectorSet(std::sin(frontRad), -std::cos(frontRad), 0.0f, 0.0f);
+        XMVECTOR       faceUp      = up;
+        if (faceAim) {
+            const auto& fa = lv.faceFollow.frame;
+            figureFront    = XMVectorSet(fa.forward.x, fa.forward.y, fa.forward.z, 0.0f);
+            faceUp         = XMVectorSet(fa.up.x, fa.up.y, fa.up.z, 0.0f);
+        }
+        const LightRig rig = MakeLookRig(look, camDir, figureFront, faceAim ? &faceUp : nullptr);
 
         // Key-light shadow frustum (the ortho side above) and a second one
-        // from the fill light's direction (its own map at t9).
+        // from the fill light's direction (its own map at t9). With an aim at
+        // the face a light can come from straight above or below (a face lying
+        // on its back lit from its front): it looks down the world's Y in place
+        // of a Z it runs along.
+        const auto shadowUp = [&up, faceAim](FXMVECTOR dir) {
+            return faceAim && std::fabs(XMVectorGetZ(dir)) > 0.98f ? XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f) : up;
+        };
         XMVECTOR lightDirN = XMVector3Normalize(XMLoadFloat4(&rig.keyDir));
         XMVECTOR lightPos  = XMVectorAdd(centre, XMVectorScale(lightDirN, 400.0f * figure * group));
-        XMMATRIX lightView = XMMatrixLookAtLH(lightPos, centre, up);
+        XMMATRIX lightView = XMMatrixLookAtLH(lightPos, centre, shadowUp(lightDirN));
         // 300u covers a humanoid figure; the figure scale covers a larger or smaller one.
         XMMATRIX lightProj = XMMatrixOrthographicLH(300.0f * figure * group, 300.0f * figure * group, 50.0f * figure,
                                                     800.0f * figure * group);
         XMMATRIX lightVP   = XMMatrixMultiply(lightView, lightProj);
         XMVECTOR fillDirN  = XMVector3Normalize(XMLoadFloat4(&rig.fillDir));
         XMVECTOR fillPos   = XMVectorAdd(centre, XMVectorScale(fillDirN, 400.0f * figure * group));
-        XMMATRIX fillView  = XMMatrixLookAtLH(fillPos, centre, up);
+        XMMATRIX fillView  = XMMatrixLookAtLH(fillPos, centre, shadowUp(fillDirN));
         XMMATRIX fillVP    = XMMatrixMultiply(fillView, lightProj);
 
         CbPayload base = MakeFrameBase(rig, cameraPos, lightVP, fillVP, proj);
@@ -20841,17 +21181,17 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         base.ambientGround = XMFLOAT4(look.ambientGround.r, look.ambientGround.g, look.ambientGround.b, 1.0f);
         // Billboard pieces face this camera, in world space as the pieces' worlds are (the game turned them to its own).
         const XMVECTOR cameraWorld = XMVectorAdd(cameraPos, XMVectorSet(s_drawOrigin.x, s_drawOrigin.y, s_drawOrigin.z, 0.0f));
-        for (auto& g : lv.geometry) TurnActorBillboard(g, cameraWorld, up);
+        for (auto& g : lv.geometry) TurnActorBillboard(g, cameraWorld, camUp);
         for (auto& e : lv.extras) {
             if (!ExtraShown(*e)) continue;
-            for (auto& g : e->geometry) TurnActorBillboard(g, cameraWorld, up);
+            for (auto& g : e->geometry) TurnActorBillboard(g, cameraWorld, camUp);
         }
         for (auto& p : Props().props) {
             if (!p->shown) continue;
-            for (auto& g : p->geometry) TurnActorBillboard(g, cameraWorld, up);
+            for (auto& g : p->geometry) TurnActorBillboard(g, cameraWorld, camUp);
         }
         XMStoreFloat3(&lv.castingFx.camWorld, cameraWorld);
-        XMStoreFloat3(&lv.castingFx.camUp, up);
+        XMStoreFloat3(&lv.castingFx.camUp, camUp);
         lv.castingFx.haveCam = true;
         // A readied spell's particles, drawn as the item view's (the particle shaders are a stage of their own:
         // EnsureFxShaders). Never in a portrait shot, whose ground is transparent.
@@ -20968,12 +21308,16 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             return;
         }
         TendStills(device, context, lv, static_cast<std::uint32_t>(vp.Width), static_cast<std::uint32_t>(vp.Height));
+        // A frame still is the frame as drawn; the published image goes through NR first when NeuralLive is on.
+        const bool neuralPending = NeuralLive::Process(device, context, LT().rtTex.Get(), LT().srv.Get(), LT().depthTex.Get(),
+                                                       LT().depthCopyTex.Get(), LT().depthCopySRV.Get(), plan.offW,
+                                                       plan.offH, ActorImg().view, lv.fid);
         // The offscreen IS the client's image.
         if (!PublishLiveImage(ActorImg(), lv.fid, lv.geometry.size())) {
             EndActorLive();
             return;
         }
-        if (castingStage == LVL::FxStage::Pending) ActorImg().dirty = true;
+        if (castingStage == LVL::FxStage::Pending || neuralPending) ActorImg().dirty = true;
     }
 
     // ── Idle release ────────────────────────────────────────────────────
@@ -21143,6 +21487,8 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             lv.yawDeg      = k.facingYawDeg;
             lv.frontYawDeg = k.facingYawDeg;
             lv.poseYawDeg  = k.facingYawDeg;
+            lv.head        = k.head;
+            lv.faceFollow  = {};
             lv.pitchDeg    = 0.0f;
             lv.zoomMult    = 1.0f;
             lv.pan         = {};
@@ -21231,6 +21577,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         // Seed the trackball front-facing: the yaw the collect just posed the figure at.
         lv.yawDeg      = lv.poseYawDeg;
         lv.frontYawDeg = lv.yawDeg;
+        lv.faceFollow  = {};
         lv.pitchDeg = 0.0f;
         lv.zoomMult = 1.0f;
         lv.pan      = {};
@@ -21301,10 +21648,15 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         if (!lv.active || !std::isfinite(dz)) return;
         ActorImg().dirty = true;
         // As the item viewport. 0.45× ≈ 126u from the target (face close-up),
-        // 2.6× ≈ 728u (inside the 1500u far plane), all x the figure scale.
+        // 2.6× ≈ 728u (inside the 1500u far plane), all x the figure scale; with
+        // an aim at the face, of kHeadDistance: about 32u to 182u.
         namespace MC = MirrorCameraCore;
         const float z0 = lv.zoomMult;
         const float z1 = MC::NextZoom(z0, dz);
+        if (ActorHints().aim == StillShotCore::Aim::kFace) {   // closes on the face; the figure aim's pan is kept
+            lv.zoomMult = z1;
+            return;
+        }
         const MC::V3 offset = MC::PointerOffset(MC::OrbitBasis(lv.yawDeg, lv.pitchDeg), u, v, kActorFovDeg,
                                                 lv.viewAspect, kActorCamDistance * lv.frameScale * z0);
         // 160u from the chest reaches a humanoid's head and feet, not past them.
@@ -21640,6 +21992,28 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         if (std::exchange(ActorHints().lighting, p) != p) ActorImg().dirty = true;
     }
 
+    // Any other word than face or figure is the default, figure. A change redraws; the face camera starts where the
+    // face looks (TendFaceAim), turned by the orbit the view already had.
+    void MannequinRenderer::SetAim(std::uint32_t view, std::string_view aim)
+    {
+        LiveLock           lock;
+        ActorViewScope     scope(MakeActorView(view));
+        StillShotCore::Aim a = StillShotCore::Aim::kFigure;
+        StillShotCore::ParseAim(aim, a);
+        if (std::exchange(ActorHints().aim, a) != a) ActorImg().dirty = true;
+    }
+
+    // The scale shows while the idle the view chose plays the actor (PlayMirrorClip): the idle cycle, a view
+    // following their live bones and the classic doll draw them as the game has them.
+    void MannequinRenderer::SetFigureScale(std::uint32_t view, float scale)
+    {
+        LiveLock       lock;
+        ActorViewScope scope(MakeActorView(view));
+        if (std::exchange(ActorHints().scale, scale) == scale) return;
+        ActorImg().dirty = true;
+        SKSE::log::info("MannequinRenderer/live: view {} draws its actor at {:.3f} of their size", view, scale);
+    }
+
     // On: freezes at once when the look is complete, else at the view's next tend that finds it complete
     // (TendActorLive, FreezeCore); off thaws at the next tend. dirty makes it draw.
     void MannequinRenderer::SetFreeze(std::uint32_t view, bool on)
@@ -21705,7 +22079,9 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         const auto m     = LiveViewBudgetCore::ParseMode(mode, &known);
         s_budgetMode.store(static_cast<int>(m));
         s_budgetOverrideMs.store(overrideMs > 0.0 ? overrideMs : 0.0);
-        const auto p = CurrentBudget();
+        // The mode's budget as a paused game gets it, not CurrentBudget: a settings page calls this off the game
+        // thread, where the game's pause may not be read.
+        const auto p = LiveViewBudgetCore::PolicyFor(m, REL::Module::IsVR(), s_budgetOverrideMs.load(), true);
         if (!known) SKSE::log::warn("Phantasm.ini: Budget '{}' is not smooth, balanced or light: smooth", mode);
         SKSE::log::info("Phantasm: live views take the {} budget: {:.1f} ms a frame, a view waits at most {} frame(s){}",
                         LiveViewBudgetCore::ModeName(p.mode), p.budgetMs, p.maxWait,
@@ -21851,6 +22227,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
     {
         auto&      lv   = ActorLive();
         const bool shot = ActorImg().view == 0;
+        NeuralLive::OnViewEnded(ActorImg().view);
         // A shot on the view is cancelled, its caller told once the view is down.
         const auto cancelShot = [shot]() {
             if (!shot || !s_portrait.active || s_portrait.starting) return;
@@ -21964,6 +22341,8 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             s_portrait.pitchDeg     = std::clamp(options.pitchDeg, -StillShotCore::kMaxPitchDeg, StillShotCore::kMaxPitchDeg);
             s_portrait.lighting     = options.lighting;
             s_portrait.weapons      = options.weapons;
+            s_portrait.aim          = options.aim;
+            s_portrait.zoom         = StillShotCore::ClampZoom(options.zoom);
             if (StoreLiveRect(ActorLive(), rectW, rectH)) ActorImg().dirty = true;
             SKSE::log::info("MannequinRenderer/portrait: shooting {:08X} again ({}, turn {:.0f})", actorFormId,
                             options.head ? "head and shoulders" : "figure", s_portrait.turnDeg);
@@ -21986,6 +22365,8 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         s_portrait.pitchDeg  = std::clamp(options.pitchDeg, -StillShotCore::kMaxPitchDeg, StillShotCore::kMaxPitchDeg);
         s_portrait.lighting  = options.lighting;
         s_portrait.weapons   = options.weapons;
+        s_portrait.aim       = options.aim;
+        s_portrait.zoom      = StillShotCore::ClampZoom(options.zoom);
         v.image.seq          = 0;   // no client is shown a shot
         WarmPhysicsConfigs();
         // No client's image points at the offscreen while the shot draws into it.

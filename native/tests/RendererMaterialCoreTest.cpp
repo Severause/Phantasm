@@ -45,6 +45,33 @@ namespace Phantasm::Tests
                   "culling: a hair strand draws both faces whatever its flag says");
         }
 
+        // 1c. A strand's back face: lit reversed when the material is one-sided (the game culls it)
+        {
+            const bool strand = RMC::IsHairStrand(true, 0.0f);
+            Check(RMC::StrandBackFaceReverses(false, strand) && !RMC::StrandBackFaceReverses(true, strand),
+                  "back face: a one-sided strand's is lit reversed, a two-sided strand's keeps its normal");
+            Check(!RMC::StrandBackFaceReverses(false, RMC::IsHairStrand(false, 0.0f)) &&
+                      !RMC::StrandBackFaceReverses(false, RMC::IsHairStrand(true, 0.5f)),
+                  "back face: an opaque piece and a cutout, culled, have none to light");
+            Check(RMC::HairLaneCode(false, false, false) == 0.0f && RMC::HairLaneCode(false, false, true) == 0.0f,
+                  "hair lane: not a hair-shader piece sends 0");
+            Check(RMC::HairLaneCode(true, false, false) == RMC::kHairLane &&
+                      RMC::HairLaneCode(true, true, true) == RMC::kHairLane &&
+                      RMC::HairLaneCode(true, false, true) == RMC::kHairLaneReversing,
+                  "hair lane: an opaque hair piece and a two-sided strand send 1, a one-sided strand 2");
+            Check(RMC::kHairLane > 0.5f && RMC::kHairLane < 1.5f && RMC::kHairLaneReversing > 1.5f,
+                  "hair lane: both codes read as a hair-shader piece, only one as reversing");
+            Check(RMC::ShadesNormalReversed(RMC::kHairLaneReversing, false, -0.3f),
+                  "back face: a reversed copy's normal, on the far side of its face, is reversed");
+            Check(!RMC::ShadesNormalReversed(RMC::kHairLaneReversing, false, 0.3f),
+                  "back face: a card wound the other way keeps a normal on the viewer's side of its face");
+            Check(!RMC::ShadesNormalReversed(RMC::kHairLaneReversing, true, -0.3f),
+                  "back face: a front face keeps its normal whichever side it points to");
+            Check(!RMC::ShadesNormalReversed(RMC::kHairLane, false, -0.3f) &&
+                      !RMC::ShadesNormalReversed(0.0f, false, -0.3f),
+                  "back face: a two-sided strand and a piece off the hair lane keep theirs");
+        }
+
         // 2. The colorMode.z lane: 0 / 1 / -threshold
         {
             Check(RMC::AlphaTestCode(false, 0.5f) == 0.0f, "lane: no test sends 0");

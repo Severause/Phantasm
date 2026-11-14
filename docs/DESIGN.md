@@ -16,7 +16,8 @@ reasoning behind the API and the renderer's rules.
   which are best-effort and unfrozen.
 - **No SA dependency.** Phantasm knows nothing of SA's menus, stores or settings. What SA needs from the renderer comes
   in through the API like any other client's.
-- **Requirements:** SE, AE or VR, SKSE, Address Library. A view is published as a Magelight texture image when
+- **Requirements:** SE, AE or VR, SKSE, Address Library. Neither settings page is required: the panel needs SKSE
+  Menu Framework 3, the page Magelight UI 1.5.0 or newer (section 13). A view is published as a Magelight texture image when
   Magelight with GPU texture images is installed (Phantasm asks for Magelight's API version 2, which carries them).
   With no Magelight at all, or one too old for texture images (which counts as none), since 1.0.0 a view whose client
   set its `hostless` hint draws with no image: its `Shown` carries the SRV alone, imageName and imageUrl empty, for the
@@ -71,7 +72,8 @@ The header is the contract; this section is the reasoning behind it.
   `Shown` (a resize rebuilds the offscreen, and every rebuild or device change is followed by a `Shown` with the new
   one), `Waiting` (a view that waits releases it) or `Ended`, or at `ReleaseClient`, after which no event comes. A
   `Reply` (a hint query, `stats` once a second) never rebuilds or releases the offscreen, so the SRV stays across it.
-- **Interaction:** `ResizeView`, `Orbit` (a drag), `Zoom` (a wheel step toward a point), `Refresh` (the look changed).
+- **Interaction:** `ResizeView`, `Orbit` (a drag), `Zoom` (a wheel step toward a point, or toward the face with the
+  `aim` hint at face), `Refresh` (the look changed).
   A NaN or infinite `Orbit` / `Zoom` number is `BadArgument`: it would stay in the camera until the view restarts. A
   size of 1-3 px is accepted and drawn at 4 (the renderer draws nothing smaller); only zero is refused.
 - **`RebuildActor3D(actor, who)`**: the one synchronous call, and the one with a thread rule: the main thread
@@ -147,14 +149,16 @@ This build knows:
 | `weapons` | `on` / `off` | on | weapons, shield and quiver where the game has them, and a readied spell's casting art |
 | `floor` | `on` / `off` | on | a floor that catches the shadow |
 | `lighting` | `studio`, `daylight`, `hearth`, `torchlight`, `moonlight`, `here` (anything else: hearth) | hearth | the light preset |
+| `aim` | `face` / `figure` (anything else: figure) | figure | since 1.1.0, actor views: `face` points the camera at the actor's head from in front of their face, its crown up in the picture, at a Portrait's head-and-shoulders distance. The front is where the drawn head looks (the head bone's turn read against the race skeleton's head at rest, `FaceAimCore::HeadFrame`), not the actor's heading, so an actor an animation turns around or lays down (a paired animation's partner) is still seen face on. The camera follows the head (the collect's, then the follow's live bones or the clip's each frame) with a short lag, and jumps on a turn past 120 degrees; `Orbit` turns and raises it from the face, `Zoom` closes on the face (no pan toward the pointer), and a shown `scene` widens the far plane and shadows but not its distance. The preset's figure and camera lights, the rim included, turn and rise about the face's up, so it is lit as if it stood. Without a head bone it frames the figure's front over the chest anchor, and without the race skeleton to read the head against, it takes the front from the heading. `figure`: the chest-anchored orbit from the heading |
 | `idle` | a clip name from `QueryHint("idles")`, `still` in any case (hold the pose), `file:<path>` (an animation file under Data; `meshes\` may be left off), or none (the idle cycle) | idle cycle | per actor, for the session; plays only with `pose` captured and `motion` on (else it waits). A clip name holds for the skeleton it first played on: a werewolf or Vampire Lord runs the idle cycle until they are back. A file loops from its start whether the game runs or not, its tracks mapped through its own binding onto the actor's skeleton; only Skyrim SE packfiles (`hk_2010.2.0-r1`, 64-bit) of a spline-compressed or uncompressed animation play (a resource container some exporters write beside the animation container is left alone), a file that cannot play keeps the choice (`QueryHint("idles")` and the log say why; it is not read again while Phantasm keeps it), and up to 64 MB of files are kept, the least recently played going first (a let-go file is read again when it plays next). A file holds only while a view that set it is open: once none is, the actor goes back to the idle cycle |
-| `scene` | `<FormID hex>|<idle>|<x,y,z,r>` entries separated by `;` (the offset may be left off), up to 3, or none | the actor alone | the view's other actors: each plays its idle (a clip name or `file:<path>`, as the `idle` hint; an entry with none, or `still`, is left out) at the view's actor's place, moved x along their facing, y to their right, z up and turned r degrees; an actor is drawn only while that idle plays, and the camera, far plane and shadows widen by 1.5 while one is. Set on each start of the view (none when it names none); the others go back to the idle cycle when the scene drops them or the view ends, unless another view's scene names them. An extra's look is taken when it joins: an equip shows when the view starts again or after `RebuildActor3D` of that actor |
+| `scale` | a positive number, held to 0.5 to 2 (none, or anything that is not a positive number: 1) | 1 | since 1.1.0, actor views: the view's actor drawn at this multiple of the size the game gives them, about the spot they stand on, while the idle the view chose plays them (an `idle` hint, with `pose` captured and `motion` on). Until that idle plays (its file is still being read, or was refused), with `idle` `still` or none (the idle cycle), in a view following their live bones and in the classic doll they are drawn as they are. For a client that shows an animation made for another size than the actor's own (a paired animation authored for figures of scale 1). It is meant for a few percent either way: the camera, the floor and the shadows frame the actor's own size, and a spring or soft-body bone keeps its own reach. A `Figure` still shows it; a Cutout and a Portrait draw the actor as they are, and a look posed at another size is not kept as the actor's last look |
+| `scene` | `<FormID hex>|<idle>|<x,y,z,r>|<scale>` entries separated by `;` (the offset and the scale may be left off), up to 3, or none | the actor alone | the view's other actors: each plays its idle (a clip name or `file:<path>`, as the `idle` hint; an entry with none, or `still`, is left out) at the view's actor's place, moved x along their facing, y to their right, z up and turned r degrees, at `scale` times their size (since 1.1.0; as the `scale` hint, 1 when left off); an actor is drawn only while that idle plays, and the camera, far plane and shadows widen by 1.5 while one is. Set on each start of the view (none when it names none); the others go back to the idle cycle when the scene drops them or the view ends, unless another view's scene names them. An extra's look is taken when it joins: an equip shows when the view starts again or after `RebuildActor3D` of that actor |
 | `expression` | `neutral`, `happy`, `sad`, `angry`, `afraid`, `surprised`, `puzzled`, `disgusted`, or none (as in game) | as in game | per actor, for the session |
 | `props` | `<FormID hex>|<model>` or `<FormID hex>|<model>|<node>` on an actor, `place|<model>|<x,y,z,r>` standing in the scene, entries separated by `;`, up to 16, or none | none | models the view draws in its scene (an animation's objects, its furniture). `<model>` is a .nif under Data (`meshes\` may be left off). One on an actor (the view's own, or one of the `scene` hint's) hangs from `<node>`, else the node its model's `Prn` string names (where the game attaches an animation object), else the actor's root, and is drawn while that actor plays a clip (`pose` captured, `motion` on), on the clip's pose of that node; one standing in the scene is at the view's actor's place moved and turned as a `scene` entry, and widens the camera as one does. Pieces are drawn rigid, and the models' effects and particles are not run. Set on each start of the view; they go when the view ends |
 | `keepLook` | `on` / `off` | on | `off`: what the actor wears is a try-on, not their look, so no view keeps it as their last look; holds while any open view of the actor says `off` |
 | `hostless` | `on` / `off` | off | since 1.0.0, read when the view starts: `on` says the client draws the `Shown` SRV itself, so with no Magelight (or one too old for texture images) the view draws with no image (imageName and imageUrl empty) instead of ending `no-image`. Set it before the view first draws (with or right after `OpenView`/`OpenItemView`); a change takes effect at the view's next start. Actor and item views |
 | `worn` | `male` / `female` / `off` (or `ground`) | off | since 0.3.0, item views only: an armor drawn as worn by a man or a woman, its addons' models without the body skin they carry; `off` draws its ground model. Changing it loads the item again. `RequestItemStill` takes the same key as a still hint (section 10) |
-| `freeze` | `on` / `off` | off | since 1.0.0, `on`: the view keeps drawing the look it holds (meshes, textures, face and pose as drawn, the classic pose's rest included) and collects nothing, so the actor can be dressed otherwise while another view of them draws live (a try-on beside how they looked). It freezes when it is set if the look it draws is complete, else at the first drawn frame that is (no texture still owed, no piece skipped for buffers not yet uploaded), and before a `RebuildActor3D` of the actor drops the look; a look kept while the actor was away freezes as it is. A readied spell's casting art and the props hung on the actor (drawn only while a clip plays) are not part of the frozen look, as they are not part of a kept one. Camera moves, the size, `floor` and `lighting` still act on it; `pose`, `motion`, `weapons`, `idle` and `expression` changes wait until it thaws. Its pieces and buffers are its own (a still copy, no live bone, anchor or effect handles), so it stays on screen through equips and `RebuildActor3D`; it is never kept as the actor's last look and never upgraded to a live collect, `lastSeen` is false while it holds, and stills of the actor are unaffected (a `Figure` still takes a live view of them first). `off` goes back to live at once (a collect in place, the frozen look standing in until it succeeds). The frozen look is the view's while it draws: a view that waits (`busy`), is re-targeted or ends lets it go, and freezes again on what the actor wears when it next draws. A `scene`'s other actors are not frozen. Actor views only |
+| `freeze` | `on` / `off` | off | since 1.0.0, `on`: the view keeps drawing the look it holds (meshes, textures, face and pose as drawn, the classic pose's rest included) and collects nothing, so the actor can be dressed otherwise while another view of them draws live (a try-on beside how they looked). It freezes when it is set if the look it draws is complete, else at the first drawn frame that is (no texture still owed, no piece skipped for buffers not yet uploaded), and before a `RebuildActor3D` of the actor drops the look; a look kept while the actor was away freezes as it is. A readied spell's casting art and the props hung on the actor (drawn only while a clip plays) are not part of the frozen look, as they are not part of a kept one. Camera moves, the size, `floor` and `lighting` still act on it; `pose`, `motion`, `weapons`, `idle`, `scale` and `expression` changes wait until it thaws. Its pieces and buffers are its own (a still copy, no live bone, anchor or effect handles), so it stays on screen through equips and `RebuildActor3D`; it is never kept as the actor's last look and never upgraded to a live collect, `lastSeen` is false while it holds, and stills of the actor are unaffected (a `Figure` still takes a live view of them first). `off` goes back to live at once (a collect in place, the frozen look standing in until it succeeds). The frozen look is the view's while it draws: a view that waits (`busy`), is re-targeted or ends lets it go, and freezes again on what the actor wears when it next draws. A `scene`'s other actors are not frozen. Actor views only |
 
 `idle` and `expression` are kept by the renderer per actor for the session: a view that starts drawing applies them
 only when it sets them (another client's choice for the same actor stands otherwise), and removing one while the view
@@ -239,6 +243,10 @@ Queries (`QueryHint`, answered by a `Reply` whose `json` is):
   than a palette holds (the log names the bone and the test); it is never tried for a skin the game would not draw
   either (`UnboundPlace::kHidden`). A skin bound this way does not count as bound for `ClassicForUnbound`, so an actor
   with one skin refused still takes the classic pose whole.
+- **A palette holds 256 bones** (`ShaderContractCore::kMaxBones`, the size of `cbBones` on both sides), every bone
+  one shape can address: Phantasm draws from the engine's own vertex buffer, whose four bone indices per vertex are
+  UINT8, so a larger palette (Bone Limit Extender's) would never be indexed. A skin with more bones is not skinned,
+  captured or at rest, and keeps its bind placement (the log says `more bones than the palette holds`).
 - **Skins the engine has not bound yet are left out of a captured live view** (`ActorCollectCore::UnboundPlaceOf`,
   `LeavesOutUnbound`): drawn, such a skin would stay rigid at its rest node while a pose or clip moves the body (hair
   floating away after a rebuild). A skin the game would not draw either (no shader, dropped by the hair-hide, body
@@ -250,6 +258,15 @@ Queries (`QueryHint`, answered by a `Reply` whose `json` is):
   first `kUnboundSettleTries` rechecks the look counts as incomplete: it is not kept as the actor's last look and a
   `freeze` waits; a skin still unbound after that no longer holds either back. A frozen view does not recheck its
   scene's actors.
+- **Hair strands draw both faces, and a one-sided strand's back face is lit as a front face**
+  (`RendererMaterialCore::CullsBackFaces`, `StrandBackFaceReverses`, `ShadesNormalReversed`). The game culls the back
+  faces of hair whose material is not two-sided; the views draw them, since a thin card's back half is part of the
+  hair as seen. Hair made two-sided by geometry (a reversed copy of each triangle in the same place, its normals
+  pointing in, as many Sims 4 conversions are) would show the copy, lit from the inside, wherever it wins the depth
+  tie: dark flakes with triangle edges on the lit side, light ones on the dark side. So on such a back face the vertex
+  normal is reversed where it points to the far side of its own triangle (the triangle's facing, not the view
+  direction, which a bent vertex normal near the silhouette would fool). A two-sided strand, whose back face the game
+  draws too, a card wound the other way whose normals still point out, and every front face keep their normals.
 - **Next (no API change):** views of the same actor drawn with the same `pose` and `weapons` sharing one collect.
 
 ## 7. Game load
@@ -349,13 +366,91 @@ frames the same), about 44 units of height shown. `standingPx` is the figure's s
 `RequestStillHinted` is `RequestStill` with still hints (`StillShotCore::Parse`: `key=value` pairs separated by `;`,
 unfrozen like view hints, an unknown key or value ignored). For a Cutout or a Portrait, `turn` turns the camera from
 the figure's front (degrees, toward their left for a positive turn; 14 when unset) and `lighting` picks a lighting
-preset (Hearth when unset). A Figure still takes the drawing view's camera and light and ignores them.
+preset (Hearth when unset). Since 1.1.0 `aim=face` makes a Portrait face the drawn head as the view hint does, with no
+lag, `turn` and `pitch` measured from where the face looks: for the shot's live pose when its standing idle cannot
+play (otherwise the idle stands the actor along their heading anyway). A Cutout ignores it. Since 1.1.0 `zoom` (0.5
+to 3, 1 when unset) brings a Portrait's camera closer or further, with either aim: the frame's top edge stays where it
+was, over the crown, and the frame closes from below, so about 2 shows the face alone
+(`StillShotCore::HeadBelowBone`); a Cutout ignores it. A head shot's aim follows the head as the pose moves it after
+the collect, with either aim. A Figure still takes the drawing view's camera and light (its `aim` included) and
+ignores them.
 
 `RequestItemStill` is a shot of an item's model on an item view of its own (`ItemShotStart`): the model as
 `OpenItemView` draws it, its effects and particles run `kItemSettleMs` (or until `kItemTimeoutMs`), on a transparent
 ground with the item view's neutral light, read back like a Cutout (`standingPx` 0). `turn` turns it from the item
 view's opening side. Its reasons are the Cutout's less the actor ones, plus `no-model` (the item drew nothing). While
 it draws the item carrier is open, an item menu that refuses saving, for about half a second.
+
+**Neural stills** (`Phantasm.ini [NeuralRendering]`, `NeuralStills.h`). When `Enabled` and `Folder` turn it on, a Cutout's or a
+Portrait's shot goes through NVIDIA DLSS NR before it is fitted and answered. The library is the player's own
+`nvngx_dlssnr.dll` (`NeuralSource.h`, rules in `NeuralSourceCore`): the folder or library file `Folder` names, or
+with `Folder = auto` the copy a neural rendering mod installed, which is the one a mod has loaded in the game, else
+the first found under `Data/SKSE/Plugins`, `Data/Shaders` or the game's folder (read as the game sees them, so a mod
+manager's virtual folders count); up to `kMaxTries` found copies are tried. A mod may keep its copies under names of
+its own (`nvngx_dlssnr*.dll`: Theo's Render Pipeline ships `nvngx_dlssnr_int8.dll` and NVIDIA's builds under their
+version). Those are found too, and within a folder the order is the file the mod is set to run from (Theo's
+`NeuralRenderingRuntimePath`), on RTX 50 and later the versioned NVIDIA builds, newest first, then
+`nvngx_dlssnr.dll`, then the rest; a file Theo's own rules keep off the game's GPU is left out (`Suits`: its INT8
+build on RTX 40, a versioned NVIDIA build before RTX 50, where Theo's patches it in memory from a kernel pack, which
+Phantasm does not do). NVIDIA's loader finds a library by its own file name only, so a copy under another name is
+loaded and called directly, signed or not. The work runs inside the game, from `PhantasmNRInProc.dll` beside Phantasm
+in `SKSE/Plugins/Phantasm/` (`NeuralInProc.h`, `nr/PhantasmNR.h`): loaded only when NR is turned on, and called on two
+threads, the NR worker's and, for live frames, the render thread's. NR is a Vulkan feature, so it keeps a Vulkan
+device of its own and talks to NVIDIA's loader, the NGX core of the graphics driver (`_nvngx.dll`, found through the
+driver's registry entries, else the Windows system folder). The library holds no code of NVIDIA's and is built without
+NVIDIA's SDK: `nr/Ngx.h` is Phantasm's own statement of the layouts and entry points the core and a feature library
+export, and each is reached by its export name. Two things that SDK's library did for its callers are NR's own: the
+core lists a library's Vulkan extensions only for one it will run itself, so a library run directly is given the list
+the core gives for the builds it takes; and the core's shutdown writes through a second argument, which it is handed.
+What running inside the game has to answer is the Windows loader lock. NR's start loads some seventy libraries, each
+starts inside that lock, held by the thread that loads it, and another mod's code on the game's presenting thread asks
+for the lock after every library load (the Skyrim Upscaler takes a module list in the frame's present): whatever one
+of those libraries takes to start is how long the game stands still. Three things keep that short.
+`PhantasmNR_FlagNoLayers` makes NR's Vulkan instance with no implicit layer (the Vulkan loader's
+`VK_LOADER_LAYERS_DISABLE=~implicit~`, set for the length of the start and put back; a loader older than 1.3.234 does
+not read it and NR then refuses to start: `NeuralLayerCore`), so what loads is Windows' and the graphics driver's. A
+Vulkan instance otherwise brings in every implicit layer registered on the machine: overlays, capture hooks, a global
+ReShade, which started inside the game on NR's thread, hooked the game's input from there and held the lock for twenty
+seconds. NR runs from a private copy of the library (`NeuralSource::PrivateCopy`, under `%LOCALAPPDATA%\Phantasm\NR`,
+one per version of the file): a module apart from the one the player's mod has loaded. And the worker starts NR at
+kDataLoaded, while the game is still loading to its main menu, where a wait for the loader lock is loading time, and
+nothing is loaded after the start (measured outside the game: the start loads 68 libraries, the slowest of them holds
+the lock 36 ms, and stills of any size load none). A settings page that turns NR on in play starts it then, outside
+that window: the player asked for it, and the page says it is starting. What is left: a library of the driver's that is slow to start still
+holds the game for that long (the start watches the lock and the log names the library, at once when a hold passes
+half a second); a fault in NVIDIA's code is the game's crash; NVIDIA's NGX core is one module, shared with the
+player's mod; and NR's memory is the game's. NVIDIA's loader takes only an NVIDIA-signed library built for the GPU. A
+signed copy it refuses is not run at all; an unsigned one (a community build for an older GPU, a pre-release one) is,
+unless `Unsigned = 0`, loaded and called through the library's own Vulkan entry points, the ones the loader calls. The
+library asks Windows which module calls it and takes only NVIDIA's loader, so the private copy's own imports of
+`GetModuleFileName` are pointed at an answer naming the loader; its start and its feature's creation run behind a
+fault guard, so a copy built for another GPU is a refusal. One worker thread starts NR (when the mod it follows had
+its own NR off at kDataLoaded: as soon as that mod turns NR on, or with `Prestart = 0` at the first shot or view after
+that: a shot is then answered late by the seconds NR takes to start, a view shown as drawn meanwhile) and runs every
+shot, so the shot queue does not wait for it; the answer is posted back to the game thread. NR's switch, style and strengths are the ones the player
+set in the mod the library belongs to (`Follow`, `NeuralSettingsCore`: Skyrim Upscaler's `SkyrimUpscaler.ini`, Theo's
+Render Pipeline's ini under its user ini, Open Shaders' `SettingsUser.json`, told apart by the folder the library was
+found in), laid over `Phantasm.ini`'s, which stand for what the mod does not set; the worker reads the files again
+when they change, so a change in the mod's menu reaches the next shot and the next live frame, and a mod that turns
+its NR off turns Phantasm's off (NR that has not started is not started until it is on again). The shot is laid over a
+dark ground (NR takes an opaque picture) and the ground taken off its answer (`NeuralStillCore`): a pixel's colour
+never exceeds its coverage, so the edge stays clean, and the figure is given a flat depth (the shot keeps none of its
+own). A shot NR cannot take is answered as drawn, and NR that cannot start (its own library missing, no copy of
+NVIDIA's it can run, no GPU for it) is off for the session, logged once. NR's memory goes back to the driver after
+`kIdleTrim` without a shot. Item stills are never changed.
+
+**Neural live views** (`[NeuralRendering] LiveViews`, `NeuralLive.h`) run the same NR over an actor view's frames on
+the GPU, one view at a time (the first to draw while none holds it, until it ends or has not drawn for a second; the
+next view to draw then takes over, with the same objects when it is the same size). After the
+frame is drawn and before it is published, the offscreen is scaled (`LiveScale` of its supersampled size) into a float
+texture NR's Vulkan device imports by NT handle, with the frame's depth; a shared D3D11 fence is signalled and
+flushed; NR is queued to wait for that value and signal the next; only once it is queued does the game's context wait for
+the next value (on the GPU) and scale NR's answer back into the offscreen, so the game never waits for a signal that
+will not come. A frame NR cannot queue is published as drawn and turns live NR off for the session. NR keeps its
+history with no motion vectors (measured: the answer barely moves with the figure) and starts it again when the
+actor or the offscreen changes; a size change or a view of another size attaches again on the worker, and nothing is
+attached after `kIdleDetachMs` without a frame. While NR is being set up for a view its frames are published as drawn
+and `Process` asks for the next one, so a view whose picture does not change still gets one frame through NR. A frame still (`StillOfView`) is taken before NR, as drawn.
 
 ## 11. Effects and known gaps
 
@@ -392,6 +487,19 @@ What the actor view draws of an actor's effects:
   third-person root in first person), the hidden shapes below it stay out (blood shells, a hidden duplicate body, a
   helmet a toggle hid). When most shapes below are hidden too, the flags are read as a fade's and nothing is left out
   for them. Which nodes a distance fade flags is not verified; the collect logs both counts.
+- **A world another mod left shrunk**: a first-person body mod (Improved Camera) hides the head, the upper arms and
+  the weapons on the back of the player's third-person body for the game's own picture by shrinking the node to a
+  thousandth, updating the worlds below it and putting the local scale back. The worlds stay shrunk while the locals
+  say the part shows, so a pose drawn from the bones' worlds puts every vertex of the part on one point (a neck that
+  ends in a cone). A captured collect, a follow tick and a clip rig therefore take such a node's world, and those of
+  the nodes below it, from their locals on the nearest ancestor whose world is sound
+  (`ActorCollectCore::TakesChain`, `PosedWorld`), not from the shrunk world scaled back up: positions under a world
+  shrunk a thousandfold are rounded away. A node whose own local scale hides it stays hidden, so a part the mod keeps
+  shrunk through its local scale (its first-person view on a mount, as a werewolf or in a scripted scene) stays out.
+  Below a shrunk node, a world written since at a scale of its own is kept; a physics bone whose world still carries
+  the shrunk scale is drawn at rest. The first such pass of an actor logs the nodes. Not covered: the classic pose,
+  whose skins do not read those worlds but whose head re-parent does, and a readied spell's art, whose magic node and
+  particles keep the game's worlds.
 
 Known gaps:
 
@@ -416,11 +524,41 @@ Known gaps:
 - `api/Phantasm_API.h` the public header (MIT), the one clients copy
 - `native/src` the plugin; `native/src/core` engine-free rules; `native/tests` their tests
 - `native/extern/magelight` Magelight's API headers (MIT), copied unchanged
-- `data/` the files installed under `Data` (the blank carrier movie, `SKSE/Plugins/Phantasm.ini` with the live-view
-  budget, the licences)
+- `native/extern/skse-menu-framework` SKSE Menu Framework's API header (MIT), copied unchanged
+- `data/` the files installed under `Data` (the blank carrier movie, `SKSE/Plugins/Phantasm.ini`, the Magelight
+  settings page under `Magelight/Phantasm/views/settings`, the licences)
 - `testclient/` PhantasmProbe, a development client (never shipped)
 
 `native\build.ps1 -Tests` builds the plugin and runs the self-tests (its header lists what it needs;
 `PHANTASM_BUILD_DIR` sets the build folder). `native/ports/commonlibsse-ng` is an overlay port that pins
 CommonLibSSE-NG to MinLL/CommonLibVR, the MIT continuation, with a VR fix. Packaging a release:
 [RELEASING.md](RELEASING.md).
+
+## 13. Settings while the game runs
+
+`Settings.h` holds `Phantasm.ini` in force. `Settings::Load` reads it at kDataLoaded (`SettingsCore::Parse`, engine-free
+and tested); after that two optional pages read and change the values, and `Settings::Apply` puts a change in force and
+writes it back into the file's own text (`SettingsCore::Rewrite`: a changed key's line keeps its place and its
+comments, a key the file lacks is added only when its value is not the default the file's silence means).
+
+- **What holds at once**: the live views' budget (`SetLiveBudget`, atomics), the Magelight page's key
+  (`SettingsPage::Rebind`: the host lets go of the old key and takes the new one; one it refuses, held by another mod,
+  leaves the old one bound and `Status::keyError` says why), and for neural rendering its switch, its live views and
+  their size, Follow, Prestart, the style, the strengths and the passes. `NeuralStills::Reconfigure` hands the change
+  to the NR worker, which takes it up ahead of its jobs: the worker owns the configuration, other threads read its
+  atomics. Turning NR on starts it there, as a followed mod turning its own NR on does. A `Folder` that holds no
+  library is not settled: the status says so, and a changed `Folder` is looked at again.
+- **What waits for the next start of the game**: where NR's library comes from (`Folder`, `Unsigned`) once NR has
+  found it. `Status::restartNeeded` says so; the file has the new value.
+- **The pages** call only `Settings` (`Get`, `Apply`, `ApplyJson`, `TakePageKey`, `GetStatus`, `ToJson`), which is
+  safe on any thread and touches no game state, so neither page needs the game thread. A page catches the key for
+  the Magelight page as a Windows virtual-key code and `TakePageKey` turns it into the DirectInput scan code the
+  host binds (`SettingsCore::KeyFromScan`, `KeyUsable`: not Escape, Enter or a modifier alone).
+  - `SettingsPanel` (SKSE Menu Framework, when `SKSEMenuFramework.dll` is loaded and has every export the panel calls):
+    Mod Control Panel, Phantasm > Settings. It draws on the framework's render thread, and reads the keyboard with
+    `GetAsyncKeyState` while it catches a key.
+  - `SettingsPage` (Magelight UI, when the host and `Data/Magelight/Phantasm/views/settings/index.html` are installed;
+    a copy bundled in another mod ships no page, and no view is made for it): one hand-written page, opened by
+    `[SettingsPage] Key` (Scroll Lock). The page sends `{"op":"get"}`, `{"op":"set","values":{...}}` or
+    `{"op":"key","vk":N}` (0 forgets the last refusal) to the listener `phantasmSettings` and is answered through
+    `phantasmSettingsEvent` with `{"values":{...},"status":{...}}` (`Settings::ToJson`).

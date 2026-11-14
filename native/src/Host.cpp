@@ -8,6 +8,7 @@
 #include "ItemRenderer.h"
 #include "LiveViewLifecycleCore.h"
 #include "MannequinRenderer.h"
+#include "NeuralStills.h"
 #include "PresentHandoff.h"
 #include "StillShotCore.h"
 #include "ViewRegistryCore.h"
@@ -274,6 +275,8 @@ namespace Phantasm::Host
             if (changed("weapons")) r->SetWeapons(v.id, IsOn(VRC::Hint(v, "weapons"), true));
             if (changed("floor")) r->SetFloor(v.id, IsOn(VRC::Hint(v, "floor"), true));
             if (changed("lighting")) r->SetLighting(v.id, VRC::Hint(v, "lighting"));
+            if (changed("aim")) r->SetAim(v.id, VRC::Hint(v, "aim"));
+            if (changed("scale")) r->SetFigureScale(v.id, VRC::FigureScaleHint(VRC::Hint(v, "scale")));
             if (changed("freeze")) r->SetFreeze(v.id, IsOn(VRC::Hint(v, "freeze"), false));
             // Per actor, kept by the renderer for the session: a start applies only what the view sets (another
             // client's choice for the same actor stands otherwise); a change while drawing applies the new value, and
@@ -700,15 +703,25 @@ namespace Phantasm::Host
         void StartNextShot();
 
         // The shot's outcome wrapper: frees the shot slot, notes a GPU refusal, fits the picture, answers, then starts
-        // the next queued shot (a following shot of the same actor reuses the view the renderer kept up).
+        // the next queued shot (a following shot of the same actor reuses the view the renderer kept up). An actor's
+        // shot (`actor`) goes through NeuralStills first when it is on, at the size it was drawn, and is answered
+        // from a later task; the next shot does not wait for it.
         std::function<void(bool, MannequinRenderer::PortraitShot, std::string)> ShotAnswer(
             std::function<void(bool, MannequinRenderer::PortraitShot, std::string)> answer, std::uint32_t width,
-            std::uint32_t height, std::uint32_t id)
+            std::uint32_t height, std::uint32_t id, bool actor)
         {
-            return [answer = std::move(answer), width, height, id](bool ok, MannequinRenderer::PortraitShot s, std::string w) {
+            return [answer = std::move(answer), width, height, id, actor](bool ok, MannequinRenderer::PortraitShot s, std::string w) {
                 if (g_cutoutRequest == id) g_cutoutRequest = 0, g_cutoutClient = 0;
                 if (!ok && w == "gpu-unavailable" && !MannequinRenderer::GetSingleton()->IsLiveGpuFailedForGood()) {
                     g_gpuHold.Note(std::chrono::steady_clock::now(), LiveViewLifecycleCore::kGpuRetryDelay);
+                }
+                if (ok && actor && NeuralStills::Enabled()) {
+                    NeuralStills::Submit(std::move(s), [answer, width, height](MannequinRenderer::PortraitShot done) {
+                        MannequinRenderer::FitShot(done, width, height);   // CPU only: safe on the NR worker
+                        Post([answer, done = std::move(done)]() mutable { answer(true, std::move(done), {}); });
+                    });
+                    StartNextShot();
+                    return;
                 }
                 if (ok) MannequinRenderer::FitShot(s, width, height);
                 answer(ok, std::move(s), ok ? std::string{} : CutoutReason(w));
@@ -752,7 +765,7 @@ namespace Phantasm::Host
         {
             if (!KnownClient(q.client)) return false;   // released since: nobody hears the answer
             auto*       r       = MannequinRenderer::GetSingleton();
-            const auto  answer  = ShotAnswer(q.answer, q.width, q.height, q.id);
+            const auto  answer  = ShotAnswer(q.answer, q.width, q.height, q.id, !q.item);
             const char* why     = nullptr;
             bool        started = false;
             if (q.item) {
@@ -767,6 +780,8 @@ namespace Phantasm::Host
                 if (q.hints.hasPitch) options.pitchDeg = q.hints.pitchDeg;
                 if (q.hints.hasLighting) options.lighting = q.hints.lighting;
                 if (q.hints.hasWeapons) options.weapons = q.hints.weapons;
+                options.aim = q.hints.aim;
+                if (q.hints.hasZoom) options.zoom = q.hints.zoom;
                 why     = r->PortraitRefusal(q.formId);
                 started = !why && r->PortraitStart(q.formId, options, answer);
                 if (!started && !why) why = "not-loaded";
