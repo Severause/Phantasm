@@ -6,6 +6,46 @@ became 1.2.0: `docs/API.md` and the header still give the `aim`, `zoom` and `sca
 them on `pluginVersion >= 10100`, which 1.2.0 passes. A client tells versions apart by `Interface1::pluginVersion`
 (MAJOR*10000 + MINOR*100 + PATCH).
 
+## 1.3.0 - 2026-11-17
+
+For players:
+
+- An NPC whose record gives a very dark skin tone (a Dremora, for one) has a body as dark as the game draws it.
+  Phantasm used to ignore a tone that dark and drew the plain skin texture, so the body came out lighter than in
+  game and no longer matched the face.
+- Skin no longer looks like plastic when its texture keeps the shine in the normal map, as most body and skin texture
+  mods with tangent-space normal maps do. Phantasm gave such skin the same gloss everywhere, or read a separate
+  specular map (`_s`) the game itself ignores on that kind of skin; it now reads where the texture says the skin
+  shines, as the game does. Skin with a model-space normal map and its `_s` map (the vanilla body's) is drawn as
+  before.
+- A head-and-shoulders picture of a creature whose skeleton names its head its own way (a dog's `Canine_Head`, for
+  one) now shows its head, with either `aim`. Phantasm looked only for a person's head bone, so it framed where a
+  person's head would be: the empty air above a dog, which a client such as SeverActions then refused to keep.
+- A body mod's bone sizes (The New Gentleman, SOS, RaceMenu's bone scales) now show in Phantasm's classic pose too,
+  as in the live pose. The classic pose read each skeleton bone from a copy the skeleton keeps, which those mods do
+  not change, so a client that asks for that pose (OmniSight, for one) drew such a body at its default sizes.
+- With neural rendering on for live views, a wide view (OmniSight's capture, for one) is no longer blurry. NR worked
+  at half of the view's supersampled picture, which a wide view supersamples less, so it worked well below the size
+  the view is shown at and its answer was stretched back up. `LiveScale` (Working size) now means the same on every
+  view: 0.5 is the size shown, 1 up to twice that (at most the view's supersampled picture). NR's GPU time grows
+  with the size a view is shown at, so a large wide view costs about three times what it did; a tall mirror's is
+  unchanged.
+- A ghost looks like one, in a live view and in a still: its ghostly shader's blue rim and glow are drawn over it, and
+  its own body and clothes faint under them, so what is behind it shows through. Phantasm drew ghosts as ordinary
+  people before. The look is read from the records, so a copy the game never draws (a preview spawn) has it too. Not
+  drawn yet: the shader's drifting particles, a ghost whose look is a script's fade (Katria), another character's
+  lasting shader, and a spell's passing one (Oakflesh, for one).
+- In a scene a view draws with several actors (a scene preview, for one), a penis is fitted into the opening it is
+  aimed at, a vagina, an anus or a mouth, instead of passing beside it or through the body: the scene's animations
+  are made for reference bodies, which the actors drawn are not. The opening spreads by how deep it goes. It needs a
+  skeleton with the genital bones (XPMSE with a body mod's), and a mouth's place is an estimate still being tuned.
+
+For mod authors:
+
+- `Phantasm.log` names, once per view and pose, each genital bone of a character's skinned pieces with the scale the
+  game gives it and the scale the view draws it at (`MannequinRenderer/genitals:`), to find which pose drops a body
+  mod's size (The New Gentleman, SOS).
+
 ## 1.2.0 - 2026-11-13
 
 For players:

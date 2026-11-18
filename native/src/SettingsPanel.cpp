@@ -250,7 +250,7 @@ namespace Phantasm::SettingsPanel
                 g_values.liveScale = percent / 100.0f;
             }
             AfterEdit();
-            Note("The size neural rendering works at, against a live view's picture.");
+            Note("The size neural rendering works at: 50% is the size a live view is shown at, 100% up to twice that.");
         }
 
         void DrawLiveViews()

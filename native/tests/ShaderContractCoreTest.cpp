@@ -113,6 +113,9 @@ namespace Phantasm::Tests
         const auto psMain = Compile(live, "PS_Main", "ps_5_0");
         Check(!psMain.empty() && Mismatch(psMain, { .perObject = true }).empty(),
               "shader contract: PS_Main reads cbPerObject as written");
+        const auto psMembrane = Compile(live, "PS_Membrane", "ps_5_0");
+        Check(!psMembrane.empty() && Mismatch(psMembrane, { .perObject = true }).empty(),
+              "shader contract: PS_Membrane reads cbPerObject as written");
         bool others = true;
         for (const auto& [entry, target] : { std::pair{ "PS_ShadowClip", "ps_5_0" }, std::pair{ "VS_Floor", "vs_5_0" },
                                              std::pair{ "PS_Floor", "ps_5_0" } }) {

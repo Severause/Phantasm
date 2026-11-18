@@ -359,6 +359,14 @@ namespace Phantasm::Tests
                       Near(RMC::SkinTintOverlay(0.25f, 0.0f), 0.0625f, 1e-6f) &&
                       Near(RMC::SkinTintOverlay(0.25f, 1.0f), 0.4375f, 1e-6f),
                   "overlay tint: on a 0.25 grey base, grey is identity, black b^2, white 2b - b^2");
+
+            Check(!RMC::DropsSkinTone(true, 0.02f, 0.03f, 0.01f) && !RMC::DropsSkinTone(true, 0.0f, 0.0f, 0.0f),
+                  "skin tone: textured skin keeps a near-black tone (the engine draws b^2)");
+            Check(RMC::DropsSkinTone(false, 0.02f, 0.03f, 0.01f) && RMC::DropsSkinTone(false, 0.0f, 0.0f, 0.0f),
+                  "skin tone: untextured skin drops a near-black tone (its flat colour would be black)");
+            Check(!RMC::DropsSkinTone(false, 0.62f, 0.47f, 0.43f) && !RMC::DropsSkinTone(false, 0.02f, 0.10f, 0.01f) &&
+                      RMC::DropsSkinTone(false, 0.02f, 0.099f, 0.01f),
+                  "skin tone: one channel at 0.10 or more is not near-black");
         }
 
         // 11. Skin decals: a blended skin piece is a decal, a tested decal-flagged one a cutout
@@ -467,6 +475,14 @@ namespace Phantasm::Tests
             Check(RMC::EnvGlossMaskCode(true, true, false) == 0.0f && RMC::EnvGlossMaskCode(true, false, true) == 0.0f &&
                       RMC::EnvGlossMaskCode(false, true, true) == 0.0f,
                   "env gloss: not with a mask path, without a cube, or on skin");
+
+            Check(RMC::NormalAlphaGlossCode(true, true) == 1.0f,
+                  "normal-alpha gloss: every tangent-space piece with a map, skin included, as the engine's");
+            Check(RMC::NormalAlphaGlossCode(false, true) == 0.0f && RMC::NormalAlphaGlossCode(true, false) == 0.0f,
+                  "normal-alpha gloss: not for a model-space map or without a normal map");
+            Check(RMC::SkinReadsSpecMap(true, true), "skin _s: a model-space skin reads its slot-7 map");
+            Check(!RMC::SkinReadsSpecMap(false, true) && !RMC::SkinReadsSpecMap(true, false),
+                  "skin _s: never on a tangent-space skin, whatever slot 7 names, nor with no slot-7 path");
 
             Check(RMC::SkipsDeferredStrand(true, true), "deferred strand: left out until its diffuse loads");
             Check(!RMC::SkipsDeferredStrand(true, false) && !RMC::SkipsDeferredStrand(false, true),

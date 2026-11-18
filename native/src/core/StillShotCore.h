@@ -179,6 +179,15 @@ namespace Phantasm::StillShotCore
     /// kHeadTargetLift; one further forward (a horse's, a dragon's) is aimed at, kHeadBelowBone under the bone.
     inline constexpr float kHumanoidHeadReach = 15.0f;
     inline constexpr float kHeadBelowBone     = 6.0f;
+    /// A skeleton with no "NPC Head" aims its head shot at the still test's node (MannequinClipCore::SignatureNodeRank)
+    /// only when that node is a head (4: a dog's Canine_Head) or a skull (3: a horse's HorseScull); a neck or a spine
+    /// is no head to frame, and the shot frames as a humanoid's.
+    inline constexpr int kCreatureHeadAimRank = 3;
+
+    inline constexpr bool CreatureHeadAims(int signatureRank) noexcept
+    {
+        return signatureRank >= kCreatureHeadAimRank;
+    }
     /// The head shot's vertical FOV: the actor view's.
     inline constexpr float kHeadShotFovDeg = 35.0f;
 
@@ -205,12 +214,14 @@ namespace Phantasm::StillShotCore
 
     /// Where a head shot's camera looks, from the chest anchor (which stands chestUnits x figure over the feet), in
     /// world units. headOffset: the drawn head bone from the actor's position, NaN when it has none. zoom: the shot's.
-    inline V3 HeadShotTarget(V3 headOffset, float figure, float chestUnits, float zoom = 1.0f) noexcept
+    /// creature: headOffset is a creature's own head or skull node (CreatureHeadAims), aimed at wherever it stands.
+    inline V3 HeadShotTarget(V3 headOffset, float figure, float chestUnits, float zoom = 1.0f,
+                             bool creature = false) noexcept
     {
         const float below = HeadBelowBone(zoom);
         const V3    humanoid{ 0.0f, 0.0f, (kHeadTargetLift + kHeadBelowBone - below) * figure };
         if (!std::isfinite(headOffset.x) || !std::isfinite(headOffset.y) || !std::isfinite(headOffset.z)) return humanoid;
-        if (std::hypot(headOffset.x, headOffset.y) <= kHumanoidHeadReach * figure) return humanoid;
+        if (!creature && std::hypot(headOffset.x, headOffset.y) <= kHumanoidHeadReach * figure) return humanoid;
         return { headOffset.x, headOffset.y, headOffset.z - (chestUnits + below) * figure };
     }
 

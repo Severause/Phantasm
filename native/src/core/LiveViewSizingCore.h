@@ -57,4 +57,19 @@ namespace Phantasm::LiveViewSizingCore
         p.offH = side(rectH);
         return p;
     }
+
+    /// The size neural rendering works at for a live frame of a view of rectW x rectH, as a factor of the offscreen
+    /// PlanImage gives it: liveScale of the offscreen the view would have with no kMaxSide cap, so the setting means
+    /// the same for every view (0.5 = the size shown) and a view the cap supersampled less is not worked below the
+    /// size it is shown at, its answer stretched back up. Exactly liveScale on an uncapped view; at most 1 (the
+    /// offscreen itself); liveScale, at most 1, when the view's size is unusable.
+    inline float NeuralScale(float rectW, float rectH, float liveScale) noexcept
+    {
+        if (!std::isfinite(liveScale) || liveScale <= 0.0f) return 0.0f;
+        if (!std::isfinite(rectW) || !std::isfinite(rectH) || rectW < kMinDrawPx || rectH < kMinDrawPx) {
+            return std::min(liveScale, 1.0f);
+        }
+        const float s = std::min(kSupersample, static_cast<float>(kMaxSide) / std::max(rectW, rectH));
+        return std::clamp(liveScale * kSupersample / s, 0.0f, 1.0f);
+    }
 }

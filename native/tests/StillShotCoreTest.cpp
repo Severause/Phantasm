@@ -129,6 +129,23 @@ namespace Phantasm::Tests
             const auto t = SS::HeadShotTarget({ NAN, 0.0f, 0.0f }, 1.0f, 75.0f);
             Check(t.z == SS::kHeadTargetLift, "still: no head bone frames as a humanoid");
         }
+        Check(SS::CreatureHeadAims(4) && SS::CreatureHeadAims(3),
+              "still: a creature's head or skull node gives the head shot its aim");
+        Check(!SS::CreatureHeadAims(2) && !SS::CreatureHeadAims(1) && !SS::CreatureHeadAims(0),
+              "still: a neck, a spine or no node frames as a humanoid");
+        {
+            // A husky: head 35 forward and 45 up at figure 0.71 (the root scale; it has no NPC Head).
+            const auto  t     = SS::HeadShotTarget({ 0.0f, 35.0f, 45.0f }, 0.71f, 75.0f, 1.0f, true);
+            const float wantZ = 45.0f - (75.0f + SS::kHeadBelowBone) * 0.71f;
+            Check(t.y == 35.0f && std::fabs(t.z - wantZ) < 0.001f, "still: a dog's head node is aimed at, under it");
+        }
+        {
+            // A creature head node close over its position (a sitting dog) is still its head, not a humanoid's.
+            const auto t = SS::HeadShotTarget({ 2.0f, 4.0f, 40.0f }, 0.71f, 75.0f, 1.0f, true);
+            Check(t.x == 2.0f && t.y == 4.0f, "still: a creature head node near over the feet is aimed at too");
+            const auto h = SS::HeadShotTarget({ 2.0f, 4.0f, 40.0f }, 0.71f, 75.0f);
+            Check(h.x == 0.0f && h.y == 0.0f, "still: an NPC Head that near frames from the lift");
+        }
 
         // ── The head shot's zoom ──
         {

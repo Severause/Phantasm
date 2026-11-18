@@ -153,6 +153,15 @@ namespace Phantasm::RestPoseCore
         return out;
     }
 
+    /// A flattened-tree bone's live local: its own node's when it has one (nodeLocal null: none) and that is finite,
+    /// else the tree entry's. The game composes the tree from the nodes, and a body mod (TNG, SOS, RaceMenu's bone
+    /// scales through NiOverride) sets a bone's node while the entry keeps the local it was built with. A negative
+    /// scale passes through; RestLocal makes it usable.
+    inline Xf TreeEntryLive(const Xf& entryLocal, const Xf* nodeLocal) noexcept
+    {
+        return nodeLocal && IsFinite(*nodeLocal) ? *nodeLocal : entryLocal;
+    }
+
     /// An accumulated scale past this reads as a broken node, not a skeleton.
     inline constexpr float kMaxRestScale = 50.0f;
 

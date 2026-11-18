@@ -29,6 +29,7 @@
 #include "ImageHostProbeCore.h"
 #include "ItemCollectCore.h"
 #include "MirrorCameraCore.h"
+#include "MembraneCore.h"
 #include "MirrorLightingCore.h"
 #include "StillShotCore.h"
 #include "NifParticleCore.h"
@@ -36,6 +37,7 @@
 #include "ControllerKeysCore.h"
 #include "RendererFxCore.h"
 #include "FaceAimCore.h"
+#include "PenetrationFitCore.h"
 #include "FaceMorphCore.h"
 #include "FreezeCore.h"
 #include "ViewRegistryCore.h"
@@ -275,7 +277,8 @@ cbuffer cbPerObject : register(b0)
     //        as the skin _sk slot, but env materials are never skin).
     //   .z = glossFromNormalAlpha (1 = the PS masks specular intensity by
     //        the normal map's alpha channel, the engine's own behaviour;
-    //        non-skin tangent-space pieces only, skin keeps its spec model).
+    //        every tangent-space piece, skin included:
+    //        RendererMaterialCore::NormalAlphaGlossCode).
     //   .w = envMaskByGloss (1 = an env-mapped non-skin piece with a cube and
     //        no mask: the reflection is masked by the gloss, the normal map's
     //        alpha or a model-space piece's slot-7 map at t5, as the engine's)
@@ -336,6 +339,13 @@ cbuffer cbPerObject : register(b0)
     // The item view's metal (0 in the actor views, whose reflection stays as it was): x = 1 for the item view's
     // reflection model, y = a metal's reflectance head-on (the Fresnel curve's F0).
     float4   metalLook;
+    // An effect shader's membrane (PS_Membrane; MembraneCore): rgb = the rim (edge) colour and the fill colour as the
+    // record stores them, a = their strengths; membraneSpace x = the feet's z in posWorld's space, y = the figure's
+    // height (0: the fill takes the mesh's UVs), z = the edge falloff, w = the alpha the piece's own diffuse clips
+    // the membrane at (0: none).
+    float4   membraneRim;
+    float4   membraneFill;
+    float4   membraneSpace;
 };
 
 // Gamma decode for diffuse / glow samples. Skyrim binds every diffuse SRV
@@ -799,8 +809,7 @@ float4 PS_Main(VS_OUT input, bool isFrontFace : SV_IsFrontFace) : SV_Target
         float3 nmTS = normalize(nmSample.rgb * 2.0 - 1.0);
         nWorld = normalize(nmTS.x * T + nmTS.y * B + nmTS.z * N);
         // The engine reads specular intensity from the normal map's alpha
-        // (DXT1 maps sample 1.0). miscParams.z arms it for non-skin pieces;
-        // skin keeps its material-driven spec.
+        // (DXT1 maps sample 1.0); miscParams.z arms it.
         glossMask = lerp(1.0, nmSample.a, miscParams.z);
     } else {
         nWorld = input.normalWorld * backFlip;
@@ -993,8 +1002,8 @@ float4 PS_Main(VS_OUT input, bool isFrontFace : SV_IsFrontFace) : SV_Target
                  spec * specularParams.x * specMask * glossMask;
 
         // Three additions for skin only (colorMode.w), all masked by the _s
-        // map so they land where the artist painted shine (lips / nose /
-        // forehead):
+        // map (model-space skin) or the normal map's alpha (glossMask) so they
+        // land where the artist painted shine (lips / nose / forehead):
         //   1. Dual-lobe sheen: a TIGHT second highlight (4× power, half
         //      strength) riding the broad base lobe. One broad Blinn-Phong
         //      lobe reads as dull plastic — the tight lobe is the "alive"
@@ -1013,12 +1022,12 @@ float4 PS_Main(VS_OUT input, bool isFrontFace : SV_IsFrontFace) : SV_Target
             float  ndothF = saturate(dot(nNorm, halfF));
             float  specF  = pow(ndothF, max(specularParams.y, 1.0)) * fillVis;
             color += fillLightColor.rgb * fillLightColor.a * specTint *
-                     specF * specularParams.x * 0.6 * specMask;
+                     specF * specularParams.x * 0.6 * specMask * glossMask;
 
             float ndotv    = saturate(dot(nNorm, viewDir));
             float fresSkin = pow(1.0 - ndotv, 5.0) * keyVis;
             color += fresSkin * 0.03 * keyLightColor.rgb * keyLightColor.a * specTint *
-                     specMask;
+                     specMask * glossMask;
         }
         // Glass (a blend piece, pieceFlags.w == 2): let the glint PUNCH
         // THROUGH the low-alpha composite. SrcAlpha blending multiplies the
@@ -1172,6 +1181,47 @@ float4 PS_Main(VS_OUT input, bool isFrontFace : SV_IsFrontFace) : SV_Target
             over / (1.0 + over * (1.0 / (1.0 - kT)));
 
     return float4(saturate(color) * strandCoverage, outAlpha);
+}
+)" R"(
+// A ghost's effect shader membrane over a piece (MembraneCore), drawn added after the piece. t0 = the fill texture
+// (membraneFill.a 0: none), t1 = the piece's own diffuse, whose alpha (times the vertex alpha under colorMode.x)
+// clips the membrane at membraneSpace.w and scales it above that: a hair card's or a cutout's holes stay holes and
+// its soft edge fades out rather than lighting up. The rim is the edge colour at
+// (1 - |N.V|) to the falloff; the fill is the fill colour and texture times the fill strength and the texture's
+// alpha, laid on by height over the figure and by angle about it (membraneSpace.y > 0), else by the mesh's UVs.
+// Colours decode as the diffuse does. The alpha is the brightest channel, so the glow shows over a transparent ground.
+float4 PS_Membrane(VS_OUT input, bool isFrontFace : SV_IsFrontFace) : SV_Target
+{
+    float coverage = 1.0;
+    if (membraneSpace.w > 0.0) {
+        coverage = normalMapTex.Sample(diffuseSamp, input.uv).a;
+        if (colorMode.x > 0.5) coverage *= input.color.a;
+        clip(coverage - membraneSpace.w);
+        coverage = saturate(coverage);
+    }
+    // A flat-lit piece (tintParams.w 2: no vertex normal, the FaceGen head) takes its face's normal, as PS_Main does.
+    float3 n = tintParams.w > 1.5 ? cross(ddy(input.posWorld.xyz), ddx(input.posWorld.xyz)) : input.normalWorld;
+    n = normalize(n);
+    if (!isFrontFace) n = -n;
+    const float3 v      = normalize(cameraPosWorld.xyz - input.posWorld.xyz);
+    const float  rimMul = pow(saturate(1.0 - abs(dot(n, v))), max(membraneSpace.z, 0.01));
+    float3 color = sRGBToLinear(membraneRim.rgb) * membraneRim.a * rimMul;
+    if (membraneFill.a > 0.0) {
+        float4 fill;
+        if (membraneSpace.y > 0.0) {
+            // Clamped (envSamp): a wrapping sampler would bleed the gradient's other end into the crown.
+            const float2 p = input.posWorld.xy;
+            float2 uv;
+            uv.x = (p.x == 0.0 && p.y == 0.0) ? 0.0 : abs(atan2(p.y, p.x)) * 0.318309886;
+            uv.y = saturate((input.posWorld.z - membraneSpace.x) / membraneSpace.y);
+            fill = diffuseTex.Sample(envSamp, uv);
+        } else {
+            fill = diffuseTex.Sample(diffuseSamp, input.uv);
+        }
+        color += (sRGBToLinear(membraneFill.rgb) + sRGBToLinear(fill.rgb)) * fill.a * membraneFill.a;
+    }
+    color = max(color, 0.0) * coverage;
+    return float4(color, saturate(max(color.r, max(color.g, color.b))));
 }
 
 // The shadow depth pass's pixel shader for cutouts (DrawShadowDepthPass): the
@@ -1402,7 +1452,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
 
     struct LiveShaderBlobs
     {
-        std::vector<std::uint8_t> vs, ps, psShadowClip, vsFloor, psFloor;
+        std::vector<std::uint8_t> vs, ps, psShadowClip, vsFloor, psFloor, psMembrane;
     };
     static std::atomic<LVL::ShaderBuild> s_shaderBuild{ LVL::ShaderBuild::NotStarted };
     // Written by the compile thread before it publishes Ready (release);
@@ -1457,6 +1507,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
                                           { .perObject = true, .bones = true }) &&
                         CompileLiveShader(kShaderHLSL, "PS_Main", "ps_5_0", b.ps, { .perObject = true }) &&
                         CompileLiveShader(kShaderHLSL, "PS_ShadowClip", "ps_5_0", b.psShadowClip) &&
+                        CompileLiveShader(kShaderHLSL, "PS_Membrane", "ps_5_0", b.psMembrane, { .perObject = true }) &&
                         CompileLiveShader(kShaderHLSL, "VS_Floor", "vs_5_0", b.vsFloor) &&
                         CompileLiveShader(kShaderHLSL, "PS_Floor", "ps_5_0", b.psFloor);
         s_shaderBuild.store(ok ? LVL::ShaderBuild::Ready : LVL::ShaderBuild::Failed,
@@ -1540,6 +1591,8 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         ComPtr<ID3D11PixelShader>  ps;
         // The shadow depth pass's clip-only shader for cutouts (PS_ShadowClip).
         ComPtr<ID3D11PixelShader>  psShadowClip;
+        // An effect shader's membrane over a piece (PS_Membrane, DrawMembranePass).
+        ComPtr<ID3D11PixelShader>  psMembrane;
         // The actor view's floor (VS_Floor / PS_Floor; no input layout).
         ComPtr<ID3D11VertexShader> vsFloor;
         ComPtr<ID3D11PixelShader>  psFloor;
@@ -1587,6 +1640,14 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         // solid dark and SrcAlpha would apply coverage twice.
         ComPtr<ID3D11BlendState>        blendStatePremul;
         ComPtr<ID3D11BlendState>        blendStateAdd;       // additive blend pieces: SRC_ALPHA / ONE
+        // An effect shader's membrane: colour and alpha ONE / ONE (PS_Membrane emits its glow and its brightest channel),
+        // and on a ghost's hair the brighter of it and what is drawn (MAX), so layered cards never add up.
+        ComPtr<ID3D11BlendState>        blendStateMembrane;
+        ComPtr<ID3D11BlendState>        blendStateMembraneMax;
+        // A ghost's own pieces under its membrane: the blend factor's share of the piece over the rest (colour and
+        // alpha BLEND_FACTOR / INV_BLEND_FACTOR, the factor MembraneCore::Look::baseAlpha), and their depth alone.
+        ComPtr<ID3D11BlendState>        blendStateFaint;
+        ComPtr<ID3D11BlendState>        blendStateDepthOnly;
         // s0 per piece, indexed by its material's texture clamp mode
         // (RendererMaterialCore::SamplerIndex): linear, clamp or wrap per axis.
         std::array<ComPtr<ID3D11SamplerState>, RendererMaterialCore::kSamplerCount> diffuseSamplers;
@@ -1773,6 +1834,8 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         hr = device->CreatePixelShader(blobs.psShadowClip.data(), blobs.psShadowClip.size(),
                                        nullptr, &cache->psShadowClip);
         if (FAILED(hr)) return refused("the shadow clip shader");
+        hr = device->CreatePixelShader(blobs.psMembrane.data(), blobs.psMembrane.size(), nullptr, &cache->psMembrane);
+        if (FAILED(hr)) return refused("the membrane shader");
         hr = device->CreateVertexShader(blobs.vsFloor.data(), blobs.vsFloor.size(), nullptr, &cache->vsFloor);
         if (FAILED(hr)) return refused("the floor vertex shader");
         hr = device->CreatePixelShader(blobs.psFloor.data(), blobs.psFloor.size(), nullptr, &cache->psFloor);
@@ -1943,6 +2006,33 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         addDesc.RenderTarget[0].DestBlend            = D3D11_BLEND_ONE;
         hr = device->CreateBlendState(&addDesc, &cache->blendStateAdd);
         if (FAILED(hr)) return refused("the additive blend state");
+
+        D3D11_BLEND_DESC memDesc                     = abDesc;
+        memDesc.RenderTarget[0].SrcBlend             = D3D11_BLEND_ONE;
+        memDesc.RenderTarget[0].DestBlend            = D3D11_BLEND_ONE;
+        memDesc.RenderTarget[0].SrcBlendAlpha        = D3D11_BLEND_ONE;
+        memDesc.RenderTarget[0].DestBlendAlpha       = D3D11_BLEND_ONE;
+        hr = device->CreateBlendState(&memDesc, &cache->blendStateMembrane);
+        if (FAILED(hr)) return refused("the membrane blend state");
+        D3D11_BLEND_DESC memMaxDesc                  = memDesc;
+        memMaxDesc.RenderTarget[0].BlendOp           = D3D11_BLEND_OP_MAX;
+        memMaxDesc.RenderTarget[0].BlendOpAlpha      = D3D11_BLEND_OP_MAX;
+        hr = device->CreateBlendState(&memMaxDesc, &cache->blendStateMembraneMax);
+        if (FAILED(hr)) return refused("the membrane max blend state");
+
+        D3D11_BLEND_DESC faintDesc                   = abDesc;
+        faintDesc.RenderTarget[0].SrcBlend           = D3D11_BLEND_BLEND_FACTOR;
+        faintDesc.RenderTarget[0].DestBlend          = D3D11_BLEND_INV_BLEND_FACTOR;
+        faintDesc.RenderTarget[0].SrcBlendAlpha      = D3D11_BLEND_BLEND_FACTOR;
+        faintDesc.RenderTarget[0].DestBlendAlpha     = D3D11_BLEND_INV_BLEND_FACTOR;
+        hr = device->CreateBlendState(&faintDesc, &cache->blendStateFaint);
+        if (FAILED(hr)) return refused("the faint blend state");
+
+        D3D11_BLEND_DESC depthOnlyDesc                     = abDesc;
+        depthOnlyDesc.RenderTarget[0].BlendEnable          = FALSE;
+        depthOnlyDesc.RenderTarget[0].RenderTargetWriteMask = 0;
+        hr = device->CreateBlendState(&depthOnlyDesc, &cache->blendStateDepthOnly);
+        if (FAILED(hr)) return refused("the depth-only blend state");
 
         s_gpuCache = std::move(cache);
         SKSE::log::info("MannequinRenderer: GPU resources built (shaders/states/CB)");
@@ -2384,6 +2474,9 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         // untextured skin decals, engine-invisible blends ...);
         // see GetMaterialInfo's skip rules.
         bool                      shouldSkipGeom = false;
+        // The material reads a model-space normal map (its flag, or a face's _msn name), loaded or not: the one
+        // kind the engine reads skin's `_s` on (RendererMaterialCore::SkinReadsSpecMap).
+        bool                      modelSpaceMaterial = false;
         // A lighting material's kVertexColors: the engine tints by a vertex
         // colour stream only when it is set (a FaceGen head can carry a
         // stream its material disables). True for every other material.
@@ -3392,24 +3485,22 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
     // The skin tone with neither the NPC's nor the material's: a neutral peach.
     constexpr XMFLOAT3 kNeutralSkinTint{ 0.85f, 0.72f, 0.62f };
 
-    // Skin is never near-black: a near-black tint (a full-colour skin
-    // replacer leaves bodyTintColor ~0) would crush the skin (a multiply to a
-    // black silhouette, the overlay to the squared texture), so the tint is
-    // dropped and the raw texture shows.
-    // `part` names the skin in the one log line per actor and part.
+    // Skin with no texture loses a near-black tone (RendererMaterialCore::DropsSkinTone): the PS then draws its
+    // untinted fallback colour, not a black silhouette. Textured skin keeps its tone, however dark.
+    // `part` names the skin in the one log line per actor and part; `log` is false while the piece's texture is
+    // only deferred (DeferredSince), so the line waits for the pass that settles it.
     static void DropNearBlackSkinTint(MaterialInfo& info, RE::Actor* actor, RE::TESNPC* npc,
-                                      const char* part)
+                                      const char* part, bool log)
     {
-        const float mx = std::max(info.meshTintColor.x,
-                                  std::max(info.meshTintColor.y, info.meshTintColor.z));
-        if (!(mx < 0.10f)) return;
+        const auto& t = info.meshTintColor;
+        if (!RendererMaterialCore::DropsSkinTone(info.diffuseSRV != nullptr, t.x, t.y, t.z)) return;
         info.hasMeshTint = false;
         static std::unordered_set<std::string> s_logged;
-        if (actor && s_logged.insert(fmt::format("{}:{:08X}", part, actor->GetFormID())).second) {
+        if (log && actor && s_logged.insert(fmt::format("{}:{:08X}", part, actor->GetFormID())).second) {
             SKSE::log::info(
-                "MannequinRenderer: actor {:08X} {} tint degenerate (max {:.3f}, "
-                "bodyTintColor=({},{},{})) — dropping the skin tint so the raw skin texture shows",
-                actor->GetFormID(), part, mx,
+                "MannequinRenderer: actor {:08X} {} has no texture and a near-black tone (max {:.3f}, "
+                "bodyTintColor=({},{},{})) — drawn in the untinted fallback colour",
+                actor->GetFormID(), part, std::max(t.x, std::max(t.y, t.z)),
                 npc ? npc->bodyTintColor.red : 0,
                 npc ? npc->bodyTintColor.green : 0,
                 npc ? npc->bodyTintColor.blue : 0);
@@ -3861,6 +3952,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
                                 RE::BSLightingShaderMaterialBase* mat, const TexSetPaths* ts, bool decalFlagged,
                                 const char* gName)
     {
+        const std::uint32_t deferralsBefore = t_texLoadDeferrals;
         info.hasMeshTint    = true;
         info.meshTintOverlay = true;
         // Skin pieces use half-lambert squared in the PS so face + body
@@ -3972,8 +4064,9 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         // tintColor (the engine fills it from the NPC on live 3D), else a
         // neutral warm default; a skin decal takes the same tone, as the
         // skin it lies on. An overlay takes its own material's tintColor
-        // as it is (RendererMaterialCore::OverlaySkinTint): no body tone,
-        // default or near-black drop, and no body log line.
+        // as it is (RendererMaterialCore::OverlaySkinTint): no body tone
+        // or default, and no body log line. A near-black tone stays on
+        // textured skin, as in game (DropNearBlackSkinTint).
         if (info.isOverlay) {
             const auto t = RendererMaterialCore::OverlaySkinTint(true, matC.red, matC.green, matC.blue);
             info.meshTintColor   = XMFLOAT3(t.r, t.g, t.b);
@@ -3986,7 +4079,8 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             info.meshTintColor = kNeutralSkinTint;   // both zero
         }
 
-        if (!info.isOverlay) DropNearBlackSkinTint(info, actor, npc, decalLayer ? "skin decal" : "body skin");
+        // Only an untextured piece is dropped, and an untextured decal left above: the part is body skin.
+        if (!info.isOverlay) DropNearBlackSkinTint(info, actor, npc, "body skin", !DeferredSince(deferralsBefore));
 
         // Body half of the head/body luma diagnostic (see
         // s_skinLumaBody), from the body itself as drawn, its tint
@@ -4014,7 +4108,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
 
         // One info line per actor: the resolved skin tint.
         static std::unordered_set<RE::FormID> s_loggedTint;
-        if (actor && !skinLayer && s_loggedTint.insert(actor->GetFormID()).second) {
+        if (actor && !skinLayer && !DeferredSince(deferralsBefore) && s_loggedTint.insert(actor->GetFormID()).second) {
             SKSE::log::info(
                 "MannequinRenderer: actor {:08X} body skin tint RGB=({:.2f},{:.2f},{:.2f}) "
                 "(engine overlay) "
@@ -4179,6 +4273,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
     static bool ResolveFaceGenHead(MaterialInfo& info, RE::Actor* actor, RE::BSLightingShaderMaterialBase* mat,
                                    const TexSetPaths* ts, const char* gName)
     {
+        const std::uint32_t deferralsBefore = t_texLoadDeferrals;
         info.hasMeshTint    = true;
         info.useHalfLambert = true;
         info.isFaceGenHead  = true;
@@ -4243,7 +4338,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             info.meshTintColor   = XMFLOAT3(t.r, t.g, t.b);
             info.meshTintOverlay = t.engineBlend;
         } else {
-            DropNearBlackSkinTint(info, actor, npc, "facegen head");
+            DropNearBlackSkinTint(info, actor, npc, "facegen head", !DeferredSince(deferralsBefore));
         }
 
         // Engine parity: a textured head's tint multiply is white (the tone
@@ -4265,7 +4360,8 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         }
 
         static std::unordered_set<RE::FormID> s_loggedHead;
-        if (actor && !info.isOverlay && s_loggedHead.insert(actor->GetFormID()).second) {
+        if (actor && !info.isOverlay && !DeferredSince(deferralsBefore) &&
+            s_loggedHead.insert(actor->GetFormID()).second) {
             SKSE::log::info(
                 "MannequinRenderer: actor {:08X} facegen head skin tint RGB=({:.2f},{:.2f},{:.2f}) "
                 "applied={} mode={} [bodyTintColor=({},{},{})]",
@@ -4309,6 +4405,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             RE::BSShaderProperty::EShaderPropertyFlag::kModelSpaceNormals);
         const bool nameMsn = RendererMaterialCore::IsModelSpaceNormalMapName(lowerN);
         const bool isModelSpace = msnFlag || (isFaceMaterial && nameMsn);
+        info.modelSpaceMaterial = isModelSpace;
         const bool isTangentSpace = !isModelSpace &&
             RendererMaterialCore::IsTangentSpaceNormalMapName(lowerN);
 
@@ -4730,9 +4827,9 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             }
         }
         if (ts) {
-            // The skin `_s`: the material's loaded slot 7 when it is that
-            // file (MaterialMapOrPath), else the path.
-            if (ts->textures[7] && ts->textures[7][0]) {
+            // The skin `_s`, on a model-space material only (SkinReadsSpecMap): the material's loaded slot 7 when it
+            // is that file (MaterialMapOrPath), else the path.
+            if (RendererMaterialCore::SkinReadsSpecMap(info.modelSpaceMaterial, ts->textures[7] && ts->textures[7][0])) {
                 info.specMaskSRV =
                     MaterialMapOrPath(mat->specularBackLightingTexture.get(), ts->textures[7], false);
             }
@@ -5381,6 +5478,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
 
     // Defined with the scene walkers; the skeleton NIF needs them first.
     static RE::NiAVObject* FindActorHeadBone(RE::NiAVObject* root);
+    static RE::NiAVObject* FindSignatureNode(RE::NiAVObject* root);
     static bool            IsFlattenedBoneTree(const RE::NiAVObject* obj);
 
     static RestPoseCore::Xf ToRestXf(const RE::NiTransform& t)
@@ -5593,7 +5691,8 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
                 keys[i]        = NormalizeBoneName(nm);
                 auto& te       = entries[i];
                 te.parent      = be.parentIndex;
-                te.live        = ToRestXf(be.local);
+                const RP::Xf nodeLocal = be.node ? ToRestXf(be.node->local) : RP::Xf{};
+                te.live        = RP::TreeEntryLive(ToRestXf(be.local), be.node ? &nodeLocal : nullptr);
                 te.nif         = nif->Find(keys[i]);
                 te.helper      = RP::IsUndrivenHelperNode(nm ? nm : "");
                 te.isTreeNode  = be.node == tree;
@@ -8178,13 +8277,13 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
                                g.detailSRV ? 1.0f : 0.0f);
         // miscParams: x = the emissive route (EmissiveRoute). Non-skin pieces take the
         // engine's env/spec MASK (y; on t4, where skin binds its subsurface
-        // map, never both) and normal-alpha GLOSS (z; DXT1 maps sample 1.0);
-        // skin and face keep their spec model. w = a piece with no env mask
-        // masks its reflection by the gloss (EnvGlossMaskCode).
+        // map, never both). z = normal-alpha GLOSS (NormalAlphaGlossCode; DXT1
+        // maps sample 1.0). w = a piece with no env mask masks its reflection
+        // by the gloss (EnvGlossMaskCode).
         const bool nonSkin = !g.hasMeshTint && !g.isFaceGenHead && !g.isOverlay;
         p.miscParams = XMFLOAT4(RMC::EmissiveRoute(g.isEffect, g.isPBR),
                                 (nonSkin && g.envMaskSRV && !g.subsurfaceSRV) ? 1.0f : 0.0f,
-                                ((nonSkin || g.isHairMaterial) && g.tangentSpaceNormal && g.normalSRV) ? 1.0f : 0.0f,
+                                RMC::NormalAlphaGlossCode(g.tangentSpaceNormal, g.normalSRV != nullptr),
                                 RMC::EnvGlossMaskCode(nonSkin, g.envCubeSRV != nullptr, g.envMaskByGloss));
         // y = depth bias (RendererMaterialCore::ShadowBias; tune with the
         // slope-scaled rasterizer bias on acne or peter-panning): the strand
@@ -8347,6 +8446,11 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             p.tintParams.w = 2.0f;
             p.colorMode.x  = 0.0f;
             p.colorMode.y  = 0.0f;
+            // Skin is untextured here too: a near-black tone is not its flat colour (DropNearBlackSkinTint).
+            if (g.hasMeshTint && g.meshTintOverlay && !g.isOverlay &&
+                RendererMaterialCore::DropsSkinTone(false, p.skinTint.x, p.skinTint.y, p.skinTint.z)) {
+                p.skinTint.w = 0.0f;
+            }
             // The fallback layout has no skin weights, and a skinned piece's
             // identity world would put it at the origin: skip it.
             if (g.bonePalette) return;
@@ -8354,6 +8458,39 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         if (p.pieceFlags.x > 0.5f && !UploadBonePalette(context, gpu, *g.bonePalette)) return;
         if (!UploadCbPayload(context, cb, p)) return;
 
+        BindPieceGeometry(context, g);
+        context->DrawIndexed(static_cast<UINT>(g.triangleCount) * 3u, 0, 0);
+    }
+
+    // A piece's effect shader membrane (PS_Membrane), drawn added over the piece as drawn (the caller binds the membrane
+    // shader, blend and depth states, and gpu->ps again after). Front faces only, so a two-sided card or a layer that
+    // writes no depth adds it once a side. fill: the membrane's fill texture (null: the rim alone). feetZ / height:
+    // the figure's, in posWorld's space, for the projected fill.
+    static void DrawMembranePiece(ID3D11DeviceContext* context, MannequinGpuResources* gpu, ID3D11Buffer* cb,
+                                  const CbPayload& base, const GeometryEntry& g, const XMMATRIX& viewProj,
+                                  const MembraneCore::Look& m, ID3D11ShaderResourceView* fill, float feetZ, float height)
+    {
+        if (!BindPieceLayout(context, gpu, g)) return;   // the fallback layout has neither normals nor skin weights
+        context->RSSetState(gpu->rasterizerCullBack.Get());
+        ID3D11ShaderResourceView* srvs[2] = { fill, g.diffuseSRV.Get() };
+        context->PSSetShaderResources(0, 2, srvs);
+        ID3D11SamplerState* samps[2] = { gpu->diffuseSamplers[g.samplerIndex].Get(), gpu->envSampler.Get() };
+        context->PSSetSamplers(0, 2, samps);
+
+        CbPayload p = base;
+        FillPiecePayload(p, g, viewProj, PieceView::Actor);
+        // A piece with no UV attribute reads none: no clip by its diffuse, and only a projected fill.
+        const float fillStrength = fill && (m.projectedUV || g.hasUV) ? m.fillStrength : 0.0f;
+        const bool hair = g.isHairMaterial || RendererMaterialCore::IsHairStrand(g.useAlphaTest, g.alphaTestRef);
+        p.membraneRim  = XMFLOAT4(m.rim.r, m.rim.g, m.rim.b, m.rimStrength * (hair ? MembraneCore::kHairRimShare : 1.0f));
+        p.membraneFill = XMFLOAT4(m.fill.r, m.fill.g, m.fill.b, fillStrength);
+        const float clipAt = g.useAlphaTest ? (g.alphaTestRef > 0.0f ? g.alphaTestRef : MembraneCore::kSoftClip)
+                             : (g.isAlphaBlend || g.eyeBlend) ? MembraneCore::kSoftClip
+                                                              : 0.0f;
+        p.membraneSpace =
+            XMFLOAT4(feetZ, m.projectedUV ? height : 0.0f, m.falloff, g.diffuseSRV && g.hasUV ? clipAt : 0.0f);
+        if (p.pieceFlags.x > 0.5f && !UploadBonePalette(context, gpu, *g.bonePalette)) return;
+        if (!UploadCbPayload(context, cb, p)) return;
         BindPieceGeometry(context, g);
         context->DrawIndexed(static_cast<UINT>(g.triangleCount) * 3u, 0, 0);
     }
@@ -11184,6 +11321,8 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         float                      facingYawDeg = 0.0f;   // the orbit yaw facing the look's front, as it was posed
         float                      frameScale   = 1.0f;   // the figure scale it was framed at (ActorLiveState)
         DrawnHead                  head;                  // its head as drawn (ActorLiveState::head)
+        MembraneCore::Look         membrane;              // a ghost's membrane (ActorLiveState::membrane)
+        std::string                membraneFill;
         // The textures and buffers it pins, by their D3D resource, for LastCaptureCore's memory budget.
         LastCaptureCore::Resources<std::uintptr_t> resources;
     };
@@ -11670,15 +11809,19 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
                         ItemCarrierMenu::MENU_NAME);
     }
 
-    // The drawn head of the collect in progress (the view's actor's or a scene extra's), from the actor's
-    // position: PickHeadAnchor writes it with headAboveFeet and the collect copies it into its
-    // ActorLiveState::headOffset. Under LiveLock.
+    // The drawn head of the collect in progress (the view's actor's or a scene extra's), or a creature's own head or
+    // skull node without one, from the actor's position: PickHeadAnchor writes it with headAboveFeet and the collect
+    // copies it into its ActorLiveState::headOffset. Under LiveLock.
     static XMFLOAT3 s_lastHeadOffset{ NAN, NAN, NAN };
     // The same head's world (ActorLiveState::head) and, when the pose is captured, the live bone it was read from,
     // which the view follows (ActorLiveState::headNode); the collect takes the node and clears this.
     static XMFLOAT4X4      s_lastHeadWorld{};
     static bool            s_lastHeadWorldValid = false;
     static RE::NiAVObject* s_lastHeadNode       = nullptr;
+    // A creature's head or skull node a captured collect aims a head shot at, with no NPC Head (CreatureHeadAims);
+    // the collect takes it into ActorLiveState::aimNode and clears this.
+    static RE::NiAVObject* s_lastAimNode        = nullptr;
+    static bool            s_lastCreatureAim    = false;   // s_lastHeadOffset is such a node's (ActorLiveState::creatureAim)
     // ...and the race skeleton's rest head from its root (SkeletonNif::headFromRoot), read inside the collect's net.
     static XMFLOAT4X4      s_lastHeadRest{};
     static bool            s_lastHeadRestValid = false;
@@ -12614,6 +12757,30 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         XMFLOAT4 lastRoot{};
         float    lastScale = 1.0f;   // the figure scale the last pose was made at
         std::vector<MC::FramePos> lastLayerPos;
+        // The rig nodes a scene's penetration fit reads and bends (FitScenePenetration), found by name once per rig
+        // (fitFor: the rig they were found in, by its node count and first node; -1: absent): the shaft from its base
+        // to its tip, the vagina's rim and the bone behind it, the anus's rim and the bone behind it.
+        struct FitBones
+        {
+            std::size_t           nodeCount = 0;
+            std::size_t           skinCount = 0;
+            const RE::NiAVObject* first     = nullptr;
+            std::vector<int>      shaft;   // empty unless a drawn skin is weighted to a bone past its base
+            std::vector<int>      vaginaRim;
+            int                   vaginaDeep = -1;
+            std::vector<int>      anusRim;
+            int                   anusDeep = -1;
+            // Rig nodes below a shaft bone that are not the shaft (a scrotum on the base): each with its nearest
+            // shaft bone (a shaft index), carried with it.
+            std::vector<std::pair<int, std::size_t>> hangers;
+        };
+        FitBones fit;
+        // What the fit wrote last frame: the rig nodes and their worlds (a node it leaves is put back from lastWorld),
+        // and the opening the shaft took (its owner and kind; 0 / -1: none), which it keeps (PenetrationFitCore's
+        // kSwitchRatio).
+        std::vector<std::pair<int, XMFLOAT4X4>> fitWritten;
+        RE::FormID                               fitOwner = 0;
+        int                                      fitKind  = -1;
 
         const ClipTake& Cur() const { return takes[static_cast<std::size_t>(cur)]; }
         ClipTake&       Cur() { return takes[static_cast<std::size_t>(cur)]; }
@@ -12730,12 +12897,17 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         // The trackball yaw that faced the NPC when the view began: the front the figure-fixed lights of a lighting
         // preset are measured from (MirrorLightingCore::Frame::kFigure).
         float                         frontYawDeg = 0.0f;
-        // The drawn head bone from the actor's position at the collect (NaN without one): a head shot's aim.
+        // The drawn head bone (a creature's head or skull node without one) from the actor's position at the collect,
+        // NaN without either: a head shot's aim.
         XMFLOAT3                      headOffset{ NAN, NAN, NAN };
         // The head as drawn, for an aim at the face: the collect's, then each frame the follow's (RefreshLivePose,
         // from headNode) or the clip's (PlayMirrorClip). headNode: the live head bone a captured collect drew on.
         DrawnHead                     head;
         RE::NiPointer<RE::NiAVObject> headNode;
+        // A creature's head or skull node a captured collect aims at (no NPC Head): the follow keeps headOffset on it,
+        // and a face aim with no head aims at headOffset.
+        RE::NiPointer<RE::NiAVObject> aimNode;
+        bool                          creatureAim = false;   // headOffset is a creature node's (StillShotCore::HeadShotTarget)
         // The face camera (FaceAimCore, TendFaceAim) and when it last stepped.
         FaceAimCore::Follow                   faceFollow;
         std::chrono::steady_clock::time_point faceAt{};
@@ -12792,6 +12964,10 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         bool                                  unboundLeftOut = false;
         // The last collect drew the classic pose for unbound skins (ClassicForUnbound); a shot reports it.
         bool                                  unboundClassic = false;
+        // A ghost's effect shader membrane over its own pieces (ReadActorMembrane at the collect; DrawActorLiveFrame
+        // draws it, and the ghost's pieces faint under it), and its fill texture's path ("": none).
+        MembraneCore::Look                    membrane;
+        std::string                           membraneFill;
         std::vector<std::string>              unboundWatch;
         std::chrono::steady_clock::time_point unboundRecheckAt{};
         // What collectComplete would be without the skins left out: it holds once LeftOutIncomplete stops counting.
@@ -12832,6 +13008,8 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         std::string                           clipLoggedName;
         std::unordered_set<std::string>       clipLoggedSets;          // the layered bakes logged this view session ("base|layer|...")
         bool                                  clipRefusalLogged = false;
+        std::uint32_t                         genitalLogSession = 0;   // NoteGenitalScales: the session genitalLogged is for
+        std::set<std::pair<const RE::BSGeometry*, int>> genitalLogged;   // (piece, pose) logged this view session
         // The last try of the chosen idle clipTryPin, for QueryHint("idles"): why it failed ("" while its file is read)
         // and whether the choice itself was refused (BakeMirrorClip's pinRefused) rather than a step before it. Empty
         // once a try bakes, when nothing is chosen, and when the view ends or takes another actor.
@@ -12934,6 +13112,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             clipProjectRead = false;
             root.reset();
             headNode.reset();
+            aimNode.reset();
         }
 
         // Arms one debounced recollect after a collect that succeeded: while equipDirtyAt stays `now` the entries
@@ -13196,12 +13375,13 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
     // Keeps a look as the NPC's in the current actor view's pose and weapons (s_keptLooks), dropping the oldest past
     // the capacity and past the memory budget.
     static void StoreKept(RE::FormID fid, std::vector<GeometryEntry> geometry, const XMFLOAT3& centre,
-                          const XMFLOAT3& collectPos, float facingYawDeg, float frameScale, const DrawnHead& head)
+                          const XMFLOAT3& collectPos, float facingYawDeg, float frameScale, const DrawnHead& head,
+                          const MembraneCore::Look& membrane, const std::string& membraneFill)
     {
         auto       resources = KeptResources(geometry);
         const auto key       = KeptKeyOf(fid);
-        s_keptLooks[key] =
-            KeptLook{ std::move(geometry), centre, collectPos, facingYawDeg, frameScale, head, std::move(resources) };
+        s_keptLooks[key]     = KeptLook{ std::move(geometry), centre,   collectPos,   facingYawDeg,        frameScale,
+                                         head,                membrane, membraneFill, std::move(resources) };
         for (const auto& old : s_keptOrder.Touch(key)) s_keptLooks.erase(old);
 
         const std::vector<LastCaptureCore::LookKey> order = s_keptOrder.Order();   // a copy: the loop below erases from it
@@ -14314,8 +14494,44 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             if (haveDrawnHead) XMStoreFloat3(&head, drawnHead.r[3]);
             const RE::NiPoint3 pos = actor->GetPosition();
             *headAboveFeet         = head.z - pos.z;
-            // The same head, all three axes, for a head shot's aim (StillShotCore::HeadShotTarget).
-            s_lastHeadOffset = XMFLOAT3(head.x - pos.x, head.y - pos.y, head.z - pos.z);
+            // The same head, all three axes, for a head shot's aim (StillShotCore::HeadShotTarget). A skeleton with
+            // no NPC Head aims at its own head or skull node (CreatureHeadAims) and keeps no head for the figure
+            // scale or the face aim: that node's height and axes are not a humanoid head's.
+            XMFLOAT3 aim = head;
+            if (!haveDrawnHead) {
+                RE::NiAVObject* node = FindSignatureNode(root);
+                const char*     name = node && node->name.c_str() ? node->name.c_str() : "";
+                if (node && StillShotCore::CreatureHeadAims(MannequinClipCore::SignatureNodeRank(name))) {
+                    // Where the view draws it, as the humanoid head above: posed as captured, else the rest pose's,
+                    // else the bind map's.
+                    XMMATRIX drawn  = XMMatrixIdentity();
+                    bool     placed = false;
+                    if (s_capturedPose) {
+                        drawn  = PosedWorld(node);
+                        placed = true;
+                    } else if (const XMMATRIX* rest = RestWorldOf(node)) {
+                        drawn  = *rest;
+                        placed = true;
+                    } else if (const auto* bindMap = GetActiveBindMap()) {
+                        auto it = bindMap->matrices.find(NormalizeBoneName(name));
+                        if (it != bindMap->matrices.end()) {
+                            drawn  = it->second;
+                            placed = true;
+                        }
+                    }
+                    if (placed && MatrixIsFinite(drawn)) {
+                        XMStoreFloat3(&aim, drawn.r[3]);
+                        s_lastAimNode     = s_capturedPose ? node : nullptr;
+                        s_lastCreatureAim = true;
+                        static std::unordered_set<RE::FormID> s_loggedCreatureAim;
+                        if (s_loggedCreatureAim.insert(actor->GetFormID()).second) {
+                            SKSE::log::info("MannequinRenderer: {:08X} has no NPC Head - a head shot aims at '{}'",
+                                            actor->GetFormID(), name);
+                        }
+                    }
+                }
+            }
+            s_lastHeadOffset = XMFLOAT3(aim.x - pos.x, aim.y - pos.y, aim.z - pos.z);
             // ...and its world, for an aim at the face.
             XMStoreFloat4x4(&s_lastHeadWorld, drawnHead);
             s_lastHeadWorldValid = haveDrawnHead && MatrixIsFinite(drawnHead);
@@ -14593,6 +14809,119 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
     // Commits ONLY on success: a failed recollect keeps the previous
     // snapshot drawable (its buffers stay pinned). `logInitial` enables the
     // first-collect diagnostics (piece count + drop dump).
+    // What the view reads of an effect shader record for its membrane (MembraneCore).
+    static MembraneCore::ShaderFacts MembraneFactsOf(const RE::TESEffectShader* s)
+    {
+        using F       = RE::EffectShaderData::Flags;
+        const auto& d = s->data;
+        const auto col = [](const RE::Color& c) {
+            return MembraneCore::Rgb{ c.red / 255.0f, c.green / 255.0f, c.blue / 255.0f };
+        };
+        MembraneCore::ShaderFacts f;
+        f.membrane        = !d.flags.any(F::kDisableTextureShader);
+        f.edge            = col(d.edgeEffectColor);
+        f.edgeFalloff     = d.edgeEffectFallOff;
+        f.edgePersistent  = d.edgeEffectPersistentAlphaRatio;
+        f.fillKeys[0]     = col(d.fillTextureEffectColorKey1);
+        f.fillKeys[1]     = col(d.fillTextureEffectColorKey2);
+        f.fillKeys[2]     = col(d.fillTextureEffectColorKey3);
+        f.fillKeyScale[0] = d.fillTextureEffectColorKeyScaleTimeColorKey1Scale;
+        f.fillKeyScale[1] = d.fillTextureEffectColorKeyScaleTimeColorKey2Scale;
+        f.fillKeyScale[2] = d.fillTextureEffectColorKeyScaleTimeColorKey3Scale;
+        f.fillKeyTime[0]  = d.fillTextureEffectColorKeyScaleTimeColorKey1Time;
+        f.fillKeyTime[1]  = d.fillTextureEffectColorKeyScaleTimeColorKey2Time;
+        f.fillKeyTime[2]  = d.fillTextureEffectColorKeyScaleTimeColorKey3Time;
+        f.fillPersistent  = d.fillTextureEffectPersistentAlphaRatio;
+        const char* fill  = s->fillTexture.textureName.c_str();
+        f.hasFillTexture  = fill && fill[0];
+        f.projectedUV     = d.flags.any(F::kFillTexProjectedUV);
+        f.skinOnly        = d.flags.any(F::kSkinOnly);
+        f.ignoreWeapons   = d.flags.any(F::kIgnoreWeapons);
+        f.edgeSubtractive = d.flags.any(F::kEdgeColorSubtractive);
+        f.greyscale       = d.flags.any(F::kGreyscaleToColor, F::kGreyscaleToAlpha);
+        return f;
+    }
+
+    // The NPC record whose spell list the game serves: up the template chain while a record takes its spells from
+    // its template (a template the walk cannot follow, a leveled list, stops it).
+    static RE::TESNPC* SpellListSource(RE::TESNPC* npc)
+    {
+        for (int guard = 0; npc && guard < 16; ++guard) {
+            if (!npc->UsesTemplate() ||
+                !npc->actorData.templateUseFlags.any(RE::ACTOR_BASE_DATA::TEMPLATE_USE_FLAG::kSpells)) {
+                return npc;
+            }
+            auto* next = npc->baseTemplateForm ? npc->baseTemplateForm->As<RE::TESNPC>() : nullptr;
+            if (!next) return npc;
+            npc = next;
+        }
+        return npc;
+    }
+
+    // A ghost's membrane (MembraneCore): for an actor whose record is a ghost (its IsGhost flag, or ActorTypeGhost on
+    // it or its race), the first effect shader with a membrane on an ability it carries (its record's, through a
+    // spells template, its race's, or one added at runtime, as defaultGhostScript adds GhostAbilityNew) whose effect
+    // keeps its shader (FXPersist). Read from the records rather than the engine's live effect, so a copy the engine
+    // never draws (a hidden preview spawn) has the look too; the effect's conditions are not tested. Loads the fill
+    // texture, so it joins the collect's working set. Logged once per actor and shader. Game thread, under the
+    // collect's crash net.
+    static void ReadActorMembrane(RE::Actor* actor, ActorLiveState& lv)
+    {
+        lv.membrane     = {};
+        lv.membraneFill.clear();
+        if (!actor) return;
+        constexpr RE::FormID kActorTypeGhost = 0x000D205E;   // Skyrim.esm
+        auto*      npc    = actor->GetActorBase();
+        auto*      source = SpellListSource(npc);
+        auto*      race   = actor->GetRace();
+        const bool ghost  = (npc && (npc->IsGhost() || npc->HasKeywordID(kActorTypeGhost))) ||
+                           (source && source->IsGhost()) || (race && race->HasKeywordID(kActorTypeGhost));
+        if (!ghost) return;
+        std::vector<RE::SpellItem*> spells;
+        const auto addList = [&spells](RE::TESSpellList::SpellData* list) {
+            if (!list || !list->spells) return;
+            for (std::uint32_t i = 0; i < list->numSpells; ++i) {
+                if (list->spells[i]) spells.push_back(list->spells[i]);
+            }
+        };
+        if (source) addList(source->GetSpellList());
+        if (race) addList(race->actorEffects);
+        for (auto* sp : actor->GetActorRuntimeData().addedSpells) {
+            if (sp) spells.push_back(sp);
+        }
+        for (auto* sp : spells) {
+            if (sp->GetSpellType() != RE::MagicSystem::SpellType::kAbility) continue;
+            for (const auto* e : sp->effects) {
+                const auto* mgef = e ? e->baseEffect : nullptr;
+                if (!mgef || !mgef->data.flags.any(RE::EffectSetting::EffectSettingData::Flag::kFXPersist)) continue;
+                const auto* shader = mgef->data.effectShader;
+                if (!shader) continue;
+                const auto look = MembraneCore::Persistent(MembraneFactsOf(shader), ghost);
+                if (!look.on) continue;
+                lv.membrane = look;
+                if (const char* fill = shader->fillTexture.textureName.c_str(); fill && fill[0]) {
+                    std::string path(fill);
+                    std::string lower = path;
+                    AsciiText::LowerInPlace(lower);
+                    lv.membraneFill = lower.rfind("textures\\", 0) == 0 || lower.rfind("textures/", 0) == 0
+                                          ? path
+                                          : "textures\\" + path;
+                    LoadTextureSRVByPath(lv.membraneFill.c_str());
+                }
+                static std::unordered_set<std::string> s_logged;
+                if (s_logged.insert(fmt::format("{:08X}|{:08X}", actor->GetFormID(), shader->GetFormID())).second) {
+                    SKSE::log::info("MannequinRenderer/membrane: {:08X} wears effect shader {:08X} through {:08X} "
+                                    "'{}': rim ({:.2f},{:.2f},{:.2f}) x {:.2f} falloff {:.2f}, fill '{}' x {:.2f}{}{}",
+                                    actor->GetFormID(), shader->GetFormID(), sp->GetFormID(), sp->GetName(), look.rim.r,
+                                    look.rim.g, look.rim.b, look.rimStrength, look.falloff, lv.membraneFill,
+                                    look.fillStrength, look.projectedUV ? " (projected)" : "",
+                                    ", its pieces drawn faint under it");
+                }
+                return;
+            }
+        }
+    }
+
     static bool CollectActorLiveGeometry(RE::Actor* actor, bool logInitial,
                                          int* noVbIbOut = nullptr, ActorLiveState* into = nullptr)
     {
@@ -14640,6 +14969,8 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             headAboveFeet = std::numeric_limits<float>::quiet_NaN();
             s_lastHeadWorldValid = false;   // PickHeadAnchor sets them
             s_lastHeadNode       = nullptr;
+            s_lastAimNode        = nullptr;
+            s_lastCreatureAim    = false;
             s_lastHeadRestValid  = false;
             return RunGuarded([&]() {
                 BuildBoneBindMap(actor);
@@ -14806,6 +15137,10 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         lv.unboundSkins   = watched;
         lv.unboundLeftOut = leftOut > 0;
         lv.unboundClassic = unbound > 0;
+        if (!RunGuarded([&]() { ReadActorMembrane(actor, lv); })) {
+            lv.membrane = {};
+            lv.membraneFill.clear();
+        }
         lv.unboundWatch   = std::move(watch);
         if (watched == 0) {
             lv.unboundRecheckAt = {};
@@ -14844,6 +15179,9 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         lv.head.have  = s_lastHeadWorldValid;
         lv.headNode   = RE::NiPointer<RE::NiAVObject>(s_lastHeadNode);
         s_lastHeadNode = nullptr;
+        lv.aimNode     = RE::NiPointer<RE::NiAVObject>(s_lastAimNode);
+        lv.creatureAim = s_lastCreatureAim;
+        s_lastAimNode  = nullptr;
         lv.head.restFromRoot = s_lastHeadRest;
         lv.head.haveRest     = s_lastHeadRestValid;
         const auto pos = actor->GetPosition();
@@ -14855,7 +15193,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         if (!into && !InPortrait() &&
             LastCaptureCore::KeepsCollect(texturesPending, noVbIb > 0 || leftOutOwed, TryOnOpen(actor))) {
             StoreKept(actor->GetFormID(), FrozenCopy(lv.geometry), lv.centre, lv.collectPos, lv.poseYawDeg,
-                      lv.frameScale, lv.head);
+                      lv.frameScale, lv.head, lv.membrane, lv.membraneFill);
         }
         return true;
     }
@@ -15042,7 +15380,8 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
                 if (lv.posedScale == 1.0f &&
                     LastCaptureCore::KeepsAtLeave(lv.collectComplete, s_keptLooks.contains(KeptKeyOf(lv.fid)),
                                                   TryOnOpen(actor))) {
-                    StoreKept(lv.fid, frozen, lv.centre, lv.collectPos, lv.poseYawDeg, lv.frameScale, lv.head);
+                    StoreKept(lv.fid, frozen, lv.centre, lv.collectPos, lv.poseYawDeg, lv.frameScale, lv.head, lv.membrane,
+                              lv.membraneFill);
                 }
                 EnterKeptLook(lv, std::move(frozen), now);
                 SKSE::log::warn("MannequinRenderer/live: recollect of {:08X} failed {} times in a row on the same "
@@ -15083,7 +15422,8 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             auto frozen = FrozenCopy(lv.geometry);
             if (actor && !InPortrait() && lv.posedScale == 1.0f &&
                 LastCaptureCore::KeepsAtLeave(lv.collectComplete, s_keptLooks.contains(KeptKeyOf(lv.fid)), TryOnOpen(actor))) {
-                StoreKept(lv.fid, frozen, lv.centre, lv.collectPos, lv.poseYawDeg, lv.frameScale, lv.head);
+                StoreKept(lv.fid, frozen, lv.centre, lv.collectPos, lv.poseYawDeg, lv.frameScale, lv.head, lv.membrane,
+                              lv.membraneFill);
             }
             EnterKeptLook(lv, std::move(frozen), now);
             SKSE::log::info("MannequinRenderer/live: {:08X} left - the view keeps their last look{}", lv.fid,
@@ -15309,6 +15649,16 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         // A readied spell's magic node follows as a piece anchored on it would.
         for (auto& a : lv.castingFx.arts) {
             if (a.magicNode) XMStoreFloat4x4(&a.magicDrawn, NiTransformToXM(a.magicNode->world));
+        }
+        if (!lv.headNode && lv.aimNode && actor) {
+            // A creature's aim node: headOffset only (no head for the face frame).
+            const XMMATRIX w = PosedWorld(lv.aimNode.get());
+            if (MatrixIsFinite(w)) {
+                XMFLOAT3 t;
+                XMStoreFloat3(&t, w.r[3]);
+                const auto pos = actor->GetPosition();
+                lv.headOffset  = XMFLOAT3(t.x - pos.x, t.y - pos.y, t.z - pos.z);
+            }
         }
         if (lv.headNode) {
             const XMMATRIX w = PosedWorld(lv.headNode.get());
@@ -20952,8 +21302,335 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         return o;
     }
 
+    // Diagnostic: once per view session, piece and pose, the scale the game gives each genital bone of a skinned piece
+    // (a TNG or SOS size is a scale on these bones) beside the scale the view draws it at, with the pelvis for
+    // reference. A genital bone whose drawn-to-game ratio differs from the pelvis's names the pose path that drops it.
+    // A size changed during a view is seen only by the next view. A classic piece kept at its bind placement has no
+    // palette and is not listed here (the "MannequinRenderer/rest:" line names it).
+    static void NoteGenitalScales(ActorLiveState& lv)
+    {
+        if (lv.showingKept) return;
+        const std::uint32_t session = ActorTrace().session;
+        if (lv.genitalLogSession != session) {
+            lv.genitalLogSession = session;
+            lv.genitalLogged.clear();
+        }
+        const bool follows = (ActorHints().motion || InPortrait()) && lv.liveCapable && !lv.liveFaulted;
+        for (const auto& g : lv.geometry) {
+            if (!g.geom || !g.bonePalette) continue;
+            auto* si = g.geom->GetGeometryRuntimeData().skinInstance.get();
+            auto* sd = si ? si->skinData.get() : nullptr;
+            if (!sd || !si->bones) continue;
+            const std::uint32_t n = PaletteBoneCount(si, *g.bonePalette);
+            if (n == 0) continue;
+            const bool clip = lv.clip.active && g.livePalette &&
+                              std::any_of(lv.clip.skins.begin(), lv.clip.skins.end(),
+                                          [&](const ClipPlayer::Skin& sk) { return sk.palette == g.livePalette; });
+            const int  mode = !g.livePalette ? 0 : clip ? 3 : follows ? 2 : 1;
+            if (!lv.genitalLogged.emplace(g.geom, mode).second) continue;
+            const auto simIt = lv.sim.skins.find(si);
+            std::string bonesText;
+            std::string pelvisText;
+            int         found = 0;
+            for (std::uint32_t i = 0; i < n; ++i) {
+                RE::NiAVObject* bone = nullptr;
+                if (!SafeReadBytes(&bone, si->bones + i, sizeof(bone)) || !bone) continue;
+                const char* name = bone->name.c_str();
+                if (!name) continue;
+                const bool genital = found < 12 && AsciiText::ContainsI(name, "genital");
+                const bool pelvis  = !genital && pelvisText.empty() && AsciiText::ContainsI(name, "NPC Pelvis");
+                if (!genital && !pelvis) continue;
+                if (genital) ++found;
+                float gameScale = bone->world.scale;
+                const RE::NiTransform* table = nullptr;
+                RE::NiTransform        world{};
+                if (si->numMatrices && si->boneWorldTransforms &&
+                    SafeReadBytes(&table, si->boneWorldTransforms + i, sizeof(table)) && table &&
+                    SafeReadBytes(&world, table, sizeof(world))) {
+                    gameScale = world.scale;
+                }
+                std::string drawnText;
+                if (ShippedBoneVerts(sd, i) == 0) {
+                    drawnText = "unweighted";
+                } else {
+                    // The cube root of the 3x3 determinant: a sprung bone's matrix need not be orthonormal.
+                    const XMMATRIX m   = XMLoadFloat4x4(&(*g.bonePalette)[i]);
+                    const float    det = std::fabs(XMVectorGetX(XMMatrixDeterminant(m)));
+                    const float    stb = ShippedSkinToBone(sd, i).scale;
+                    drawnText = fmt::format("drawn {:.3f}", stb > 1e-6f ? std::cbrt(det) / stb : 0.0f);
+                }
+                const bool simulated = simIt != lv.sim.skins.end() &&
+                                       std::any_of(simIt->second.begin(), simIt->second.end(),
+                                                   [i](const auto& e) { return e.first == i; });
+                const std::string text = fmt::format("{} game {:.3f} (local {:.3f}) {}{}", name, gameScale,
+                                                     bone->local.scale, drawnText, simulated ? " (physics)" : "");
+                if (pelvis) {
+                    pelvisText = text;
+                } else {
+                    bonesText += (bonesText.empty() ? "" : "; ") + text;
+                }
+            }
+            if (found == 0) continue;
+            static constexpr const char* kModes[] = { "rest pose", "captured", "following", "clip" };
+            SKSE::log::info("MannequinRenderer/genitals: {:08X} '{}' ({}{}): {}{}{}", lv.fid, SafeNodeName(g.geom),
+                            kModes[mode], si->numMatrices ? "" : ", unbound skin", bonesText,
+                            pelvisText.empty() ? "" : "; for reference ", pelvisText);
+        }
+    }
+
+    // The penetration fit's bones in a clip rig (ClipPlayer::FitBones), found again when the rig changed.
+    static const ClipPlayer::FitBones& FitBonesOf(ClipPlayer& cp)
+    {
+        auto& fb = cp.fit;
+        const RE::NiAVObject* first = cp.nodes.empty() ? nullptr : cp.nodes.front().obj;
+        if (fb.nodeCount == cp.nodes.size() && fb.skinCount == cp.skins.size() && fb.first == first) return fb;
+        fb           = {};
+        fb.nodeCount = cp.nodes.size();
+        fb.skinCount = cp.skins.size();
+        fb.first     = first;
+        static constexpr const char* kShaft[] = { "NPC GenitalsBase [GenBase]", "NPC Genitals01 [Gen01]",
+                                                  "NPC Genitals02 [Gen02]",     "NPC Genitals03 [Gen03]",
+                                                  "NPC Genitals04 [Gen04]",     "NPC Genitals05 [Gen05]",
+                                                  "NPC Genitals06 [Gen06]" };
+        static constexpr const char* kVaginaRim[] = { "NPC L Pussy02", "NPC R Pussy02" };
+        static constexpr const char* kAnusRim[]   = { "NPC LB Anus2", "NPC RB Anus2", "NPC RT Anus2", "NPC LT Anus2" };
+        const auto find = [&cp](const char* want) {
+            for (std::size_t i = 1; i < cp.nodes.size(); ++i) {
+                const std::string name = SafeNodeName(const_cast<RE::NiAVObject*>(cp.nodes[i].obj));
+                if (AsciiText::EqualsI(name, want)) return static_cast<int>(i);
+            }
+            return -1;
+        };
+        for (const char* n : kShaft) {
+            const int i = find(n);
+            if (i < 0) break;   // the chain from the base, as far as it goes unbroken
+            fb.shaft.push_back(i);
+        }
+        // A skeleton carries the shaft's bones whether or not a body draws one: only a skin weighted past the base
+        // makes it a shaft.
+        const bool drawn = fb.shaft.size() >= 3 && std::any_of(cp.skins.begin(), cp.skins.end(), [&](const auto& sk) {
+            return std::any_of(sk.rig.begin(), sk.rig.end(), [&](std::int32_t r) {
+                return std::find(fb.shaft.begin() + 1, fb.shaft.end(), r) != fb.shaft.end();
+            });
+        });
+        if (!drawn) fb.shaft.clear();
+        for (std::size_t i = 1; i < cp.nodes.size() && !fb.shaft.empty(); ++i) {
+            if (std::find(fb.shaft.begin(), fb.shaft.end(), static_cast<int>(i)) != fb.shaft.end()) continue;
+            int guard = 0;
+            for (int p = cp.nodes[i].parent; p > 0 && guard++ < 64; p = cp.nodes[static_cast<std::size_t>(p)].parent) {
+                const auto at = std::find(fb.shaft.begin(), fb.shaft.end(), p);
+                if (at == fb.shaft.end()) continue;
+                fb.hangers.emplace_back(static_cast<int>(i), static_cast<std::size_t>(at - fb.shaft.begin()));
+                break;
+            }
+        }
+        for (const char* n : kVaginaRim) {
+            if (const int i = find(n); i >= 0) fb.vaginaRim.push_back(i);
+        }
+        if (fb.vaginaRim.size() == 2) fb.vaginaDeep = find("NPC Pelvis [Pelv]");
+        for (const char* n : kAnusRim) {
+            if (const int i = find(n); i >= 0) fb.anusRim.push_back(i);
+        }
+        if (fb.anusRim.size() == 4) fb.anusDeep = find("NPC Spine1 [Spn1]");
+        return fb;
+    }
+
+    // Writes rig node r's world into every palette entry of the actor's skins that it poses.
+    static void WriteRigBone(ActorLiveState& a, int r, const XMMATRIX& world)
+    {
+        for (auto& sk : a.clip.skins) {
+            auto& pal = *sk.palette;
+            for (std::size_t i = 0; i < sk.rig.size() && i < pal.size(); ++i) {
+                if (sk.rig[i] != r) continue;
+                const XMMATRIX m = XMMatrixMultiply(XMLoadFloat4x4(&sk.skinToBone[i]), world);
+                if (MatrixIsFinite(m)) XMStoreFloat4x4(&pal[i], XMMatrixTranspose(m));
+            }
+        }
+    }
+
+    // A scene's penetration fit (PenetrationFitCore), once every actor in it is posed: each drawn shaft a clip poses
+    // takes the opening of another actor it is aimed at, its joints laid along a path into it (what hangs off them
+    // carried along) and the opening's rim spread by its depth. Only the drawn palettes change, from each rig's
+    // lastWorld (the clip's own pose, so the fit never builds on itself), and a node the fit wrote last frame and not
+    // this one is put back from it. Runs for the view's actor and every extra, shown or not, so a scene that ends puts
+    // its bones back. Logged once per pair and opening. The draw's thread, under the caller's crash net. True when a
+    // drawn bone changed.
+    static bool FitScenePenetration(ActorLiveState& lv)
+    {
+        namespace PF = PenetrationFitCore;
+        std::vector<ActorLiveState*> all{ &lv };
+        for (auto& e : lv.extras) all.push_back(e.get());
+        std::vector<ActorLiveState*> cast;
+        for (auto* a : all) {
+            if (a == &lv ? a->clip.active : ExtraShown(*a)) cast.push_back(a);
+        }
+        // This frame's writes per actor (rig node -> world), applied at the end against last frame's.
+        std::unordered_map<ActorLiveState*, std::vector<std::pair<int, XMMATRIX>>> writes;
+        const auto commit = [&]() {
+            bool changed = false;
+            for (auto* a : all) {
+                auto&       cp   = a->clip;
+                auto&       last = cp.fitWritten;
+                const auto  it   = writes.find(a);
+                const auto* now  = it == writes.end() ? nullptr : &it->second;
+                for (const auto& [r, w] : last) {
+                    const bool still = now && std::any_of(now->begin(), now->end(), [r](const auto& e) { return e.first == r; });
+                    if (still || static_cast<std::size_t>(r) >= cp.lastWorld.size()) continue;
+                    WriteRigBone(*a, r, XMLoadFloat4x4(&cp.lastWorld[static_cast<std::size_t>(r)]));
+                    changed = true;
+                }
+                std::vector<std::pair<int, XMFLOAT4X4>> next;
+                if (now) {
+                    for (const auto& [r, w] : *now) {
+                        XMFLOAT4X4 f;
+                        XMStoreFloat4x4(&f, w);
+                        const auto prev = std::find_if(last.begin(), last.end(), [r](const auto& e) { return e.first == r; });
+                        if (prev == last.end() || std::memcmp(&prev->second, &f, sizeof(f)) != 0) changed = true;
+                        WriteRigBone(*a, r, w);
+                        next.emplace_back(r, f);
+                    }
+                }
+                last = std::move(next);
+            }
+            return changed;
+        };
+        if (cast.size() < 2) return commit();
+        const auto posOf = [](const ActorLiveState& a, int r) {
+            const auto& w = a.clip.lastWorld[static_cast<std::size_t>(r)];
+            return PF::V3{ w._41, w._42, w._43 };
+        };
+        const auto scaleOf = [](const ActorLiveState& a, int r) {
+            const auto& w = a.clip.lastWorld[static_cast<std::size_t>(r)];
+            return std::sqrt(w._11 * w._11 + w._12 * w._12 + w._13 * w._13);
+        };
+        struct Hole
+        {
+            PF::Opening      o;
+            ActorLiveState*  owner = nullptr;
+            std::vector<int> rim;   // rig nodes the spread moves
+        };
+        std::vector<Hole> holes;
+        for (auto* a : cast) {
+            auto& cp = a->clip;
+            if (cp.lastWorld.size() != cp.nodes.size() || cp.nodes.empty()) continue;
+            const auto& fb  = FitBonesOf(cp);
+            const auto  rim = [&](const std::vector<int>& idx, int deep, PF::Kind kind) {
+                if (idx.empty() || deep < 0) return;
+                std::vector<PF::V3> pts;
+                for (int i : idx) pts.push_back(posOf(*a, i));
+                Hole h;
+                if (PF::OpeningOf(kind, pts, posOf(*a, deep), h.o)) {
+                    h.owner = a;
+                    h.rim   = idx;
+                    holes.push_back(std::move(h));
+                }
+            };
+            rim(fb.vaginaRim, fb.vaginaDeep, PF::Kind::kVagina);
+            rim(fb.anusRim, fb.anusDeep, PF::Kind::kAnus);
+            FaceAimCore::Frame face;
+            if (a->head.have && a->head.haveRest &&
+                FaceAimCore::HeadFrame(ToM3(a->head.restFromRoot), ToM3(a->head.world), face)) {
+                const auto& hw = a->head.world;
+                const float hs = std::sqrt(hw._11 * hw._11 + hw._12 * hw._12 + hw._13 * hw._13);
+                Hole        h;
+                h.o     = PF::MouthOf({ hw._41, hw._42, hw._43 }, { face.forward.x, face.forward.y, face.forward.z },
+                                      { face.up.x, face.up.y, face.up.z }, hs);
+                h.owner = a;
+                holes.push_back(std::move(h));
+            }
+        }
+        if (holes.empty()) return commit();
+
+        // The turn taking direction `from` onto `to` (a half turn about a perpendicular when they are opposite).
+        const auto turnOf = [](PF::V3 from, PF::V3 to) {
+            const XMVECTOR f   = XMVector3Normalize(XMVectorSet(from.x, from.y, from.z, 0.0f));
+            const XMVECTOR t   = XMVector3Normalize(XMVectorSet(to.x, to.y, to.z, 0.0f));
+            const XMVECTOR ax  = XMVector3Cross(f, t);
+            const float    dot = std::clamp(XMVectorGetX(XMVector3Dot(f, t)), -1.0f, 1.0f);
+            if (XMVectorGetX(XMVector3LengthSq(ax)) > 1e-10f) return XMMatrixRotationAxis(XMVector3Normalize(ax), std::acos(dot));
+            if (dot > 0.0f) return XMMatrixIdentity();
+            XMVECTOR perp = XMVector3Cross(f, XMVectorSet(1.0f, 0.0f, 0.0f, 0.0f));
+            if (XMVectorGetX(XMVector3LengthSq(perp)) < 1e-6f) perp = XMVector3Cross(f, XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f));
+            return XMMatrixRotationAxis(XMVector3Normalize(perp), XM_PI);
+        };
+        static std::unordered_set<std::string> s_logged;
+        static constexpr const char*           kKindName[] = { "vagina", "anus", "mouth" };
+        for (auto* p : cast) {
+            auto& cp = p->clip;
+            if (cp.lastWorld.size() != cp.nodes.size()) continue;
+            const auto& fb = FitBonesOf(cp);
+            if (fb.shaft.empty()) continue;
+            std::vector<PF::V3> joints;
+            for (int i : fb.shaft) joints.push_back(posOf(*p, i));
+            const float         scale = scaleOf(*p, fb.shaft.front());
+            std::vector<PF::Opening> candidates;
+            std::vector<std::size_t> holeOf;
+            int                      keep = -1;
+            for (std::size_t h = 0; h < holes.size(); ++h) {
+                if (holes[h].owner == p) continue;
+                if (holes[h].owner->fid == cp.fitOwner && static_cast<int>(holes[h].o.kind) == cp.fitKind) {
+                    keep = static_cast<int>(candidates.size());
+                }
+                candidates.push_back(holes[h].o);
+                holeOf.push_back(h);
+            }
+            const auto pick = PF::ChooseOpening(joints, candidates, scale, keep);
+            if (pick.opening < 0) {
+                cp.fitOwner = 0;
+                cp.fitKind  = -1;
+                continue;
+            }
+            const Hole& hole   = holes[holeOf[static_cast<std::size_t>(pick.opening)]];
+            cp.fitOwner        = hole.owner->fid;
+            cp.fitKind         = static_cast<int>(hole.o.kind);
+            const auto  fitted = PF::FitShaft(joints, hole.o, pick.weight);
+            // Each shaft bone keeps its own frame, turned by the turn of its segment (the last bone the one before
+            // it), at its new place; the base stays where it is.
+            auto&                 out = writes[p];
+            std::vector<XMMATRIX> bentW(joints.size());
+            std::vector<XMMATRIX> oldW(joints.size());
+            for (std::size_t j = 0; j < joints.size(); ++j) {
+                const std::size_t a = j + 1 < joints.size() ? j : j - 1;
+                const XMMATRIX    turn = turnOf(PF::Sub(joints[a + 1], joints[a]), PF::Sub(fitted[a + 1], fitted[a]));
+                oldW[j]                = XMLoadFloat4x4(&cp.lastWorld[static_cast<std::size_t>(fb.shaft[j])]);
+                XMMATRIX w             = oldW[j];
+                w.r[3]                 = XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f);
+                w                      = XMMatrixMultiply(w, turn);
+                w.r[3]                 = XMVectorSet(fitted[j].x, fitted[j].y, fitted[j].z, 1.0f);
+                bentW[j]               = w;
+                if (MatrixIsFinite(w)) out.emplace_back(fb.shaft[j], w);
+            }
+            // What hangs off a shaft bone (a scrotum on the base) keeps its place on it.
+            for (const auto& [x, s] : fb.hangers) {
+                XMVECTOR       det;
+                const XMMATRIX rel = XMMatrixMultiply(XMLoadFloat4x4(&cp.lastWorld[static_cast<std::size_t>(x)]),
+                                                      XMMatrixInverse(&det, oldW[s]));
+                const XMMATRIX w   = XMMatrixMultiply(rel, bentW[s]);
+                if (MatrixIsFinite(w)) out.emplace_back(x, w);
+            }
+            const float spread = PF::Spread(PF::Depth(fitted, hole.o), scale);
+            auto&       rimOut = writes[hole.owner];
+            for (int r : hole.rim) {
+                const PF::V3 moved = PF::SpreadBone(posOf(*hole.owner, r), hole.o, spread);
+                XMMATRIX     w     = XMLoadFloat4x4(&hole.owner->clip.lastWorld[static_cast<std::size_t>(r)]);
+                w.r[3]             = XMVectorSet(moved.x, moved.y, moved.z, 1.0f);
+                if (MatrixIsFinite(w)) rimOut.emplace_back(r, w);
+            }
+            if (s_logged.insert(fmt::format("{:08X}|{:08X}|{}", p->fid, hole.owner->fid,
+                                            static_cast<int>(hole.o.kind))).second) {
+                SKSE::log::info("MannequinRenderer/fit: {:08X}'s shaft ({} bones, scale {:.2f}) fits {:08X}'s {} "
+                                "(engaged {:.2f}, tip {:.1f} from the entrance)",
+                                p->fid, joints.size(), scale, hole.owner->fid,
+                                kKindName[static_cast<int>(hole.o.kind)], pick.weight,
+                                PF::Length(PF::Sub(joints.back(), hole.o.entrance)));
+            }
+        }
+        return commit();
+    }
+
     // Steps the face camera (lv.faceFollow) toward the drawn head this frame: its frame (FaceAimCore::HeadFrame), else
-    // the figure's front, and its target, else over the chest anchor as a Portrait shot frames a humanoid. The target
+    // the figure's front, and its target, else a creature's own head node (headOffset, from the figure's front: its
+    // axes are not a humanoid head's), else over the chest anchor as a Portrait shot frames a humanoid. The target
     // is kept from the chest anchor (the frame's draw origin), where a float settles, and follows the actor's moves at
     // once. A shot takes them as they are; a live view follows with a lag and draws again until it settles.
     static void TendFaceAim(ActorLiveState& lv, bool shot)
@@ -20969,6 +21646,10 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             if (lv.head.haveRest && FA::HeadFrame(ToM3(lv.head.restFromRoot), ToM3(lv.head.world), byHead)) frame = byHead;
             target = FA::Target({ lv.head.world._41 - lv.centre.x, lv.head.world._42 - lv.centre.y,
                                   lv.head.world._43 - lv.centre.z },
+                                frame, figure, below);
+        } else if (std::isfinite(lv.headOffset.x) && std::isfinite(lv.headOffset.y) && std::isfinite(lv.headOffset.z)) {
+            // headOffset is from the actor's position, the anchor stands kActorChestHeight x figure over it.
+            target = FA::Target({ lv.headOffset.x, lv.headOffset.y, lv.headOffset.z - kActorChestHeight * figure },
                                 frame, figure, below);
         }
         const auto  now = std::chrono::steady_clock::now();
@@ -21015,6 +21696,14 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         TickOwnFace(lv);
         TendSceneExtras(lv);
         TendSceneProps(lv);
+        if (!lv.startPending) {
+            bool bent = false;
+            if (!RunGuarded([&]() { bent = FitScenePenetration(lv); })) {
+                SKSE::log::warn("MannequinRenderer/fit: the scene's penetration fit faulted - this frame draws the clips as "
+                                "posed");
+            }
+            if (bent) ActorImg().dirty = true;
+        }
         const bool sceneShown = std::any_of(lv.extras.begin(), lv.extras.end(), [](const auto& e) { return ExtraShown(*e); }) ||
                                 std::any_of(Props().props.begin(), Props().props.end(),
                                             [](const auto& p) { return p->shown && p->entry.actor == 0; });
@@ -21045,6 +21734,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         // An aim at the face: a Portrait shot's or the view's (the "aim" hint); a Cutout shot keeps the figure.
         const bool faceAim = portrait ? s_portrait.head && s_portrait.aim == StillShotCore::Aim::kFace
                                       : ActorHints().aim == StillShotCore::Aim::kFace;
+        RunGuarded([&]() { NoteGenitalScales(lv); });   // a fault costs the log line, never the view
         if (faceAim) {
             TendFaceAim(lv, portrait);
         } else {
@@ -21103,7 +21793,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         const bool  headShot = portrait && s_portrait.head;
         const StillShotCore::V3 headAim =
             headShot ? StillShotCore::HeadShotTarget({ lv.headOffset.x, lv.headOffset.y, lv.headOffset.z }, figure,
-                                                     kActorChestHeight, s_portrait.zoom)
+                                                     kActorChestHeight, s_portrait.zoom, lv.creatureAim)
                      : StillShotCore::V3{};
         XMVECTOR    target   = XMVectorAdd(centre, headShot ? XMVectorSet(headAim.x, headAim.y, headAim.z, 0.0f)
                                                             : XMVectorSet(lv.pan.x, lv.pan.y, lv.pan.z, 0.0f));
@@ -21230,7 +21920,24 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
                 (hairStrand ? alphaPieces : opaquePieces).push_back(&g);
             }
         };
-        for (const auto& g : lv.geometry) sortPiece(g);
+        // A ghost (MembraneCore) draws its own pieces apart, after everything else so what is behind it shows: its
+        // opaque pieces faint with their depth (ghostPieces), its hair and cutouts (strands, hair-shader pieces and
+        // alpha-tested ones: a beard, a fur collar's shells) under its membrane alone and writing no depth, so the glow
+        // of the body behind them still shows (ghostHair), and its blended eyes, overlays, decals and blended gear not
+        // at all. Its effect pieces and a
+        // readied spell's art draw as they are, and so do its scene's other actors (a ghost among them is drawn
+        // solid) and props.
+        const bool ghost = lv.membrane.on;
+        std::vector<const GeometryEntry*> ghostPieces;
+        std::vector<const GeometryEntry*> ghostHair;
+        for (const auto& g : lv.geometry) {
+            if (!ghost || g.isEffect || g.castingArt >= 0) {
+                sortPiece(g);
+            } else if (g.vb && g.ib && g.geom && !g.isOverlay && !g.isSkinDecal && !g.isAlphaBlend && !g.eyeBlend) {
+                const bool soft = g.isHairMaterial || g.useAlphaTest;
+                (soft ? ghostHair : ghostPieces).push_back(&g);
+            }
+        }
         for (const auto& e : lv.extras) {
             if (!ExtraShown(*e)) continue;
             for (const auto& g : e->geometry) sortPiece(g);
@@ -21298,6 +22005,42 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             }
             EndSceneDepth(context);
         }
+        // Pass 4b — a ghost's own pieces (MembraneCore), after the transparent passes so what is behind it shows: the
+        // opaque ones' depth first, so only the nearest surface takes the rest, then them faint over the scene (the
+        // blend factor, Look::baseAlpha). No shadow: the shadow pass never saw them.
+        if (!ghostPieces.empty()) {
+            context->OMSetBlendState(gpu->blendStateDepthOnly.Get(), kNoBlendFactor, 0xFFFFFFFF);
+            context->OMSetDepthStencilState(gpu->depthState.Get(), 0);
+            for (const auto* g : ghostPieces) drawActorPiece(*g);
+            const float faint[4] = { lv.membrane.baseAlpha, lv.membrane.baseAlpha, lv.membrane.baseAlpha,
+                                     lv.membrane.baseAlpha };
+            context->OMSetBlendState(gpu->blendStateFaint.Get(), faint, 0xFFFFFFFF);
+            context->OMSetDepthStencilState(gpu->depthStateNoWrite.Get(), 0);
+            for (const auto* g : ghostPieces) drawActorPiece(*g);
+            context->OMSetBlendState(gpu->blendState.Get(), kNoBlendFactor, 0xFFFFFFFF);
+            context->OMSetDepthStencilState(gpu->depthState.Get(), 0);
+        }
+        // Pass 4c — the ghost's membrane, depth-tested, no depth write: added over its opaque pieces, then the brighter
+        // of it and what is drawn over its hair and cutouts.
+        if (!ghostPieces.empty() || !ghostHair.empty()) {
+            ID3D11ShaderResourceView* fill = nullptr;
+            if (!lv.membraneFill.empty()) fill = LoadTextureSRVByPath(lv.membraneFill.c_str());
+            const float feetZ  = XMVectorGetZ(centre) - kActorChestHeight * figure;
+            const float height = MembraneCore::kFigureHeight * figure;
+            context->PSSetShader(gpu->psMembrane.Get(), nullptr, 0);
+            context->OMSetBlendState(gpu->blendStateMembrane.Get(), kNoBlendFactor, 0xFFFFFFFF);
+            context->OMSetDepthStencilState(gpu->depthStateNoWrite.Get(), 0);
+            for (const auto* g : ghostPieces) {
+                DrawMembranePiece(context, gpu, cb, base, *g, viewProj, lv.membrane, fill, feetZ, height);
+            }
+            context->OMSetBlendState(gpu->blendStateMembraneMax.Get(), kNoBlendFactor, 0xFFFFFFFF);
+            for (const auto* g : ghostHair) {
+                DrawMembranePiece(context, gpu, cb, base, *g, viewProj, lv.membrane, fill, feetZ, height);
+            }
+            context->PSSetShader(gpu->ps.Get(), nullptr, 0);
+            context->OMSetBlendState(gpu->blendState.Get(), kNoBlendFactor, 0xFFFFFFFF);
+            context->OMSetDepthStencilState(gpu->depthState.Get(), 0);
+        }
         // Pass 5 — a readied spell's particles (ActorCastingFx), over the blended pieces as in the item view.
         if (castingStage == LVL::FxStage::Ready) {
             DrawFxParticles(context, gpu, cb, lv.castingFx.rig, view, viewProj, cameraPos, s_drawOrigin);
@@ -21311,7 +22054,7 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         // A frame still is the frame as drawn; the published image goes through NR first when NeuralLive is on.
         const bool neuralPending = NeuralLive::Process(device, context, LT().rtTex.Get(), LT().srv.Get(), LT().depthTex.Get(),
                                                        LT().depthCopyTex.Get(), LT().depthCopySRV.Get(), plan.offW,
-                                                       plan.offH, ActorImg().view, lv.fid);
+                                                       plan.offH, lv.rectW, lv.rectH, ActorImg().view, lv.fid);
         // The offscreen IS the client's image.
         if (!PublishLiveImage(ActorImg(), lv.fid, lv.geometry.size())) {
             EndActorLive();
@@ -21488,6 +22231,8 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
             lv.frontYawDeg = k.facingYawDeg;
             lv.poseYawDeg  = k.facingYawDeg;
             lv.head        = k.head;
+            lv.membrane    = k.membrane;
+            lv.membraneFill = k.membraneFill;
             lv.faceFollow  = {};
             lv.pitchDeg    = 0.0f;
             lv.zoomMult    = 1.0f;
@@ -22246,6 +22991,8 @@ float4 PS_FxComposite(FULL_OUT input) : SV_Target
         lv.unboundTries       = 0;
         lv.unboundLeftOut     = false;
         lv.unboundClassic     = false;
+        lv.membrane           = {};
+        lv.membraneFill.clear();
         lv.unboundWatch.clear();
         lv.unboundRecheckAt   = {};
         lv.completeBarLeftOut = false;

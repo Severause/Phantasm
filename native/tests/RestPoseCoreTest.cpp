@@ -155,6 +155,40 @@ namespace Phantasm::Tests
                   "flattened tree: a helper rides live; no rest local, a bad parent or a cycle stays unplaced");
         }
 
+        // A tree bone's live local: its node's, which a body mod sets, over the entry's.
+        {
+            const RP::Xf entry = At(0, 0, 5.0f, 0.8517f);
+            const RP::Xf tng   = At(0, 1.0f, 7.0f, 0.46f);
+            RP::Xf       bad   = tng;
+            bad.s              = NAN;
+            Check(Near(RP::TreeEntryLive(entry, &tng).s, 0.46f) && Near(RP::TreeEntryLive(entry, &tng).t[2], 7.0f),
+                  "tree bone: the node's local over the entry's");
+            Check(Near(RP::TreeEntryLive(entry, nullptr).s, 0.8517f) && Near(RP::TreeEntryLive(entry, &bad).s, 0.8517f),
+                  "tree bone: no node, or a node local that is not finite, keeps the entry's");
+            const RP::Xf hidden = At(0, 0, 0, 0.0f);
+            const RP::Xf cut    = At(0, 0, 0, -0.01f);
+            Check(Near(RP::RestLocal(At(0, 0, 0), RP::TreeEntryLive(entry, &hidden), RP::LocalSource::kRestWithLiveScale).s, 0.0f),
+                  "tree bone: a node hidden at scale 0 stays hidden");
+            Check(Near(RP::RestLocal(At(0, 0, 0), RP::TreeEntryLive(entry, &cut), RP::LocalSource::kRestWithLiveScale).s, 1.0f),
+                  "tree bone: a negative node scale (a cut limb's) draws at 1, as before");
+
+            // Pelvis (NIF scale 1, live 1.155) with a genital bone a body mod sized 0.46 on its node.
+            RP::NifSkeleton nif;
+            nif.local  = { At(0, 0, 0), At(0, 0, 60.0f), At(0, 2.0f, -3.0f) };
+            nif.parent = { -1, 0, 1 };
+            RP::Xf pelvisLive = At(0, 0, 60.0f);
+            pelvisLive.s      = 1.155f;
+            std::vector<RP::TreeEntry> e(3);
+            e[0] = { -1, {}, 0, false, true };
+            e[1] = { 0, pelvisLive, 1, false, false };
+            e[2] = { 1, RP::TreeEntryLive(At(0, 2.0f, -3.0f), &tng), 2, false, false };   // node local, entry's stale
+            std::vector<RP::Xf>      worlds;
+            std::vector<signed char> placed;
+            RP::PlaceTreeEntries(nif, e, At(0, 0, 0), 0, worlds, placed);
+            Check(placed[2] == 1 && Near(worlds[2].s, 1.155f * 0.46f),
+                  "tree bone: a body mod's size on the node reaches the rest pose");
+        }
+
         // How far a rest world may sit from its bind.
         Check(RP::RestAgreesWithBind(30.0f, 120.0f) && RP::RestAgreesWithBind(99.0f, 120.0f) &&
                   !RP::RestAgreesWithBind(101.0f, 120.0f) && !RP::RestAgreesWithBind(45.0f, 0.0f) &&

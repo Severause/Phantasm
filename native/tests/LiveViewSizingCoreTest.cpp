@@ -64,7 +64,23 @@ namespace Phantasm::Tests
             Check(p.ok && p.offW == LVS::kMinSide && p.offH == LVS::kMaxSide, "image: an extreme strip clamps to the limits");
         }
 
-        // 7. A view the client sizes under 4 px is stored at 4, so it draws (and its first frame answers)
+        // 7. Neural rendering works at the same share of the size shown on every view
+        {
+            const auto mirror = LVS::PlanImage(542.0f, 1029.0f);   // capped by a hair: 1078x2048
+            const float m     = LVS::NeuralScale(542.0f, 1029.0f, 0.5f);
+            Check(Near(mirror.offH * m, 1029.0f, 1.0f), "nr: the tall mirror is worked at its shown size, as before");
+            const auto wide = LVS::PlanImage(1813.0f, 1145.0f);    // capped hard: 2048x1293
+            const float w   = LVS::NeuralScale(1813.0f, 1145.0f, 0.5f);
+            Check(Near(wide.offW * w, 1813.0f, 1.0f), "nr: a wide capture is worked at its shown size, not 1024 wide");
+            Check(LVS::NeuralScale(1813.0f, 1145.0f, 1.0f) == 1.0f, "nr: never more than the offscreen");
+            Check(LVS::NeuralScale(300.0f, 570.0f, 0.5f) == 0.5f && LVS::NeuralScale(301.0f, 571.0f, 0.5f) == 0.5f,
+                  "nr: an uncapped view keeps the setting exactly");
+            Check(LVS::NeuralScale(nan, 570.0f, 0.5f) == 0.5f && LVS::NeuralScale(2.0f, 570.0f, 0.75f) == 0.75f,
+                  "nr: an unusable view size keeps the setting");
+            Check(LVS::NeuralScale(300.0f, 570.0f, nan) == 0.0f, "nr: a setting that is not finite is 0");
+        }
+
+        // 8. A view the client sizes under 4 px is stored at 4, so it draws (and its first frame answers)
         {
             Check(LVS::ViewPx(1.0f) == LVS::kMinDrawPx && LVS::ViewPx(3.0f) == LVS::kMinDrawPx &&
                       LVS::ViewPx(0.0f) == LVS::kMinDrawPx && LVS::ViewPx(-5.0f) == LVS::kMinDrawPx,

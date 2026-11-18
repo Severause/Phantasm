@@ -25,7 +25,7 @@ namespace Phantasm::NeuralStills
         bool                      unsignedCopies = true;   // a copy NVIDIA's loader refuses is loaded directly
         NeuralStillCore::Settings settings;
         bool                      live      = false;   // actor live views too (NeuralLive)
-        float                     liveScale = 0.5f;    // NR's size against a live view's offscreen, 0.25..1
+        float                     liveScale = 0.5f;    // NR's size against twice a live view's shown size, at most its offscreen, 0.25..1
         // NR that could not start at kDataLoaded (the followed mod had its own NR off) starts as soon as that mod
         // turns NR on, not at the first picture after that.
         bool                      prestart  = true;

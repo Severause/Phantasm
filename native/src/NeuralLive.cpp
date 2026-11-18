@@ -4,6 +4,7 @@
 #include "NeuralLive.h"
 
 #include "NeuralStills.h"
+#include "LiveViewSizingCore.h"
 
 #include <d3d11_4.h>
 #include <d3dcompiler.h>
@@ -270,14 +271,14 @@ float4 PSUp(VSOut i) : SV_Target { return float4(tColor.SampleLevel(sLinear, i.u
 
     bool Process(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D* offscreen,
                  ID3D11ShaderResourceView* offscreenSrv, ID3D11Texture2D* depth, ID3D11Texture2D* depthCopy,
-                 ID3D11ShaderResourceView* depthCopySrv, std::uint32_t offW, std::uint32_t offH, std::uint32_t view,
-                 std::uint32_t fid)
+                 ID3D11ShaderResourceView* depthCopySrv, std::uint32_t offW, std::uint32_t offH, float rectW,
+                 float rectH, std::uint32_t view, std::uint32_t fid)
     {
         if (!NeuralStills::LiveOn() || !NeuralStills::Enabled() || !device || !context || !offscreen || !offscreenSrv || !offW ||
             !offH) {
             return false;
         }
-        const float scale = NeuralStills::LiveScale();
+        const float scale = LiveViewSizingCore::NeuralScale(rectW, rectH, NeuralStills::LiveScale());
         // NR is on its way for this view: its frame is published as drawn and another is asked for.
         const auto pending = [view]() { return view != 0 && (g_holder.load() == view || g_next.load() == view); };
         const State state = g_state.load();

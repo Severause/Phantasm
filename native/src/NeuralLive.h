@@ -20,12 +20,13 @@ namespace Phantasm::NeuralLive
     /// Render thread, inside a live actor frame (its crash net and D3D state backup), after the frame is drawn and
     /// before it is published. offscreen is the R8G8B8A8 typeless target read through offscreenSrv (UNORM); depth is
     /// its D24S8 buffer and depthCopy / depthCopySrv the frame's readable copy of it (null: NR gets no depth).
+    /// rectW x rectH: the view's shown size, in view pixels, which the working size is measured against.
     /// True when the frame stays as drawn only because NR is still being set up for this view: the caller draws the
     /// view again next frame (a view whose picture does not change would otherwise never go through NR).
     bool Process(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D* offscreen,
                  ID3D11ShaderResourceView* offscreenSrv, ID3D11Texture2D* depth, ID3D11Texture2D* depthCopy,
-                 ID3D11ShaderResourceView* depthCopySrv, std::uint32_t offW, std::uint32_t offH, std::uint32_t view,
-                 std::uint32_t fid);
+                 ID3D11ShaderResourceView* depthCopySrv, std::uint32_t offW, std::uint32_t offH, float rectW,
+                 float rectH, std::uint32_t view, std::uint32_t fid);
 
     /// A live actor view ended: when it held NR, the next view to draw takes over at once. Any thread.
     void OnViewEnded(std::uint32_t view);

@@ -104,11 +104,17 @@ namespace Phantasm::ShaderContractCore
         DirectX::XMFLOAT4 effectSoft;
         // The item view's metal: x=1 for its reflection model (0: the actor views'), y=a metal's reflectance head-on.
         DirectX::XMFLOAT4 metalLook;
+        // An effect shader's membrane (PS_Membrane, MembraneCore): rim rgb and strength, fill rgb and strength, and
+        // x=the feet's z, y=the figure's height (0: the mesh's own UVs), z=the edge falloff, w=the piece's alpha clip
+        // (0: none).
+        DirectX::XMFLOAT4 membraneRim;
+        DirectX::XMFLOAT4 membraneFill;
+        DirectX::XMFLOAT4 membraneSpace;
     };
     inline constexpr std::uint32_t kCbPerObjectBytes =
-        sizeof(DirectX::XMMATRIX) * 5 + sizeof(DirectX::XMFLOAT4) * 28;
+        sizeof(DirectX::XMMATRIX) * 5 + sizeof(DirectX::XMFLOAT4) * 31;
     static_assert(kCbPerObjectBytes % 16 == 0, "a constant buffer is a multiple of 16 bytes");
-    static_assert(sizeof(CbPayload) == kCbPerObjectBytes, "CbPayload is 5 float4x4 and 28 float4, unpadded");
+    static_assert(sizeof(CbPayload) == kCbPerObjectBytes, "CbPayload is 5 float4x4 and 31 float4, unpadded");
 
     /// One particle vertex of the item view (FxVertex, the structured buffer VS_Fx reads at t10).
     struct FxVertexCpu
@@ -156,7 +162,8 @@ namespace Phantasm::ShaderContractCore
                  PHANTASM_CB_MEMBER(ambientGround),    PHANTASM_CB_MEMBER(floorParams),
                  PHANTASM_CB_MEMBER(floorLook),        PHANTASM_CB_MEMBER(floorLook2),
                  PHANTASM_CB_MEMBER(effectFalloff),    PHANTASM_CB_MEMBER(effectSoft),
-                 PHANTASM_CB_MEMBER(metalLook) };
+                 PHANTASM_CB_MEMBER(metalLook),        PHANTASM_CB_MEMBER(membraneRim),
+                 PHANTASM_CB_MEMBER(membraneFill),     PHANTASM_CB_MEMBER(membraneSpace) };
     }
 
 #undef PHANTASM_CB_MEMBER

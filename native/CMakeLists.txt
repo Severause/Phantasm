@@ -6,7 +6,7 @@ endif()
 
 project(
     Phantasm
-    VERSION 1.2.0
+    VERSION 1.3.0
     LANGUAGES CXX
 )
 
@@ -44,7 +44,9 @@ if(PHANTASM_BUILD_TESTS)
         tests/MannequinClipCoreTest.cpp
         tests/MannequinPhysicsCoreTest.cpp
         tests/MannequinSpringCoreTest.cpp
+        tests/MembraneCoreTest.cpp
         tests/MirrorCameraCoreTest.cpp
+        tests/PenetrationFitCoreTest.cpp
         tests/MirrorLightingCoreTest.cpp
         tests/NeuralLayerCoreTest.cpp
         tests/NeuralSettingsCoreTest.cpp

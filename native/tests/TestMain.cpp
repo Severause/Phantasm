@@ -24,6 +24,7 @@ namespace Phantasm::Tests
     void RunLiveViewSizingCoreTests();
     void RunFreezeCoreTests();
     void RunMannequinClipCoreTests();
+    void RunMembraneCoreTests();
     void RunMannequinPhysicsCoreTests();
     void RunMannequinSpringCoreTests();
     void RunMirrorCameraCoreTests();
@@ -34,6 +35,7 @@ namespace Phantasm::Tests
     void RunNeuralStillCoreTests();
     void RunSettingsCoreTests();
     void RunNifParticleCoreTests();
+    void RunPenetrationFitCoreTests();
     void RunPresentHandoffCoreTests();
     void RunRendererFxCoreTests();
     void RunRendererMaterialCoreTests();
@@ -64,6 +66,7 @@ int main()
     RunLiveViewSizingCoreTests();
     RunFreezeCoreTests();
     RunMannequinClipCoreTests();
+    RunMembraneCoreTests();
     RunMannequinPhysicsCoreTests();
     RunMannequinSpringCoreTests();
     RunMirrorCameraCoreTests();
@@ -74,6 +77,7 @@ int main()
     RunNeuralStillCoreTests();
     RunSettingsCoreTests();
     RunNifParticleCoreTests();
+    RunPenetrationFitCoreTests();
     RunPresentHandoffCoreTests();
     RunRendererFxCoreTests();
     RunRendererMaterialCoreTests();

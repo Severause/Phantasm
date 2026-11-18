@@ -356,6 +356,16 @@ namespace Phantasm::RendererMaterialCore
         return { ch(r), ch(g), ch(b), true };
     }
 
+    /// Below this on every channel a skin tone is near-black.
+    inline constexpr float kNearBlackSkinTone = 0.10f;
+
+    /// Skin with no texture draws in its tone's flat colour, so a near-black tone is dropped there: it would be a black
+    /// silhouette. Textured skin keeps any tone: the engine's overlay darkens it to b^2 at most (a Dremora's body).
+    inline bool DropsSkinTone(bool textured, float r, float g, float b) noexcept
+    {
+        return !textured && std::max(r, std::max(g, b)) < kNearBlackSkinTone;
+    }
+
     // ── Skin decals ──
 
     /// How a skin-shader piece (kFaceGen, kFaceGenRGBTint) that is not a RaceMenu overlay draws: as skin (a cutout
@@ -643,6 +653,21 @@ namespace Phantasm::RendererMaterialCore
     inline float EnvGlossMaskCode(bool nonSkin, bool haveCube, bool noMaskPath) noexcept
     {
         return nonSkin && haveCube && noMaskPath ? 1.0f : 0.0f;
+    }
+
+    /// miscParams.z: the normal map's alpha masks the specular intensity of every tangent-space piece, skin
+    /// included, as the engine's Lighting shader reads it; only a model-space piece takes its gloss from the slot-7
+    /// map (skin's `_s`, ResolveSkinMaps).
+    inline float NormalAlphaGlossCode(bool tangentSpaceNormal, bool haveNormal) noexcept
+    {
+        return tangentSpaceNormal && haveNormal ? 1.0f : 0.0f;
+    }
+
+    /// Skin binds its `_s` (slot 7) as the specular mask only on a model-space material, the one the engine reads it
+    /// on; a tangent-space skin takes the normal map's alpha (NormalAlphaGlossCode), whatever slot 7 names.
+    inline bool SkinReadsSpecMap(bool modelSpaceMaterial, bool slot7Named) noexcept
+    {
+        return modelSpaceMaterial && slot7Named;
     }
 
     /// A hair strand whose diffuse load the live view's texture budget deferred is left out of that pass: drawn, it
